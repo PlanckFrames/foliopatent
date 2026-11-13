@@ -59,13 +59,10 @@ function extractClaims(html: string): ClaimText[] {
     );
     const text = texts.join(" ").replace(/\s+/g, " ").trim();
     if (text.length < 24) continue;
-    claims.push({ number, text: text.slice(0, 1600), independent: isIndependent(text) });
-    if (claims.length >= 24) break;
+    claims.push({ number, text: text.slice(0, 2200), independent: isIndependent(text) });
+    if (claims.length >= 40) break;
   }
-  const independent = claims.filter((claim) => claim.independent);
-  const dependent = claims.filter((claim) => !claim.independent);
-  const chosen = [...independent.slice(0, 4), ...dependent.slice(0, 2)];
-  return chosen.length > 0 ? chosen : claims.slice(0, 6);
+  return claims;
 }
 
 function extractCitations(html: string): Citation[] {

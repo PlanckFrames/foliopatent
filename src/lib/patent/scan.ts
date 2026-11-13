@@ -194,7 +194,7 @@ function chemicalLinks(item: Chemical): ChemicalHit["links"] {
   const links = [
     { label: "Wikipedia", href: wikiUrl(item.wiki) },
     { label: "PubChem", href: `https://pubchem.ncbi.nlm.nih.gov/#query=${encodeURIComponent(item.name)}` },
-    { label: "ChemSpider", href: `https://www.chemspider.com/Search.aspx?q=${encodeURIComponent(item.name)}` },
+    { label: "ChemSpider", href: chemspiderUrl(item.cas || item.name) },
   ];
   if (item.cas) links.push({ label: "CAS", href: `https://commonchemistry.cas.org/detail?cas_rn=${item.cas}` });
   return links;
@@ -389,4 +389,149 @@ export function detectScanLanguage(text: string): { tess: string; label: string 
   const other = ranked.find((item) => item.hint.tess !== "eng");
   if (!other || other.hits < 3 || other.hits < english) return null;
   return { tess: other.hint.tess, label: other.hint.label };
+}
+
+export type PageFinding = {
+  chemicals: { name: string; formula: string; cas: string; note: string }[];
+  organisms: { name: string; note: string }[];
+  materials: { name: string; note: string }[];
+  technologies: { name: string; note: string }[];
+};
+
+const VAGUE = new Set([
+  "compound", "compounds", "solution", "solutions", "mixture", "mixtures", "composition", "compositions", "material",
+  "materials", "polymer", "polymers", "solvent", "solvents", "reagent", "reagents", "substance", "substances", "agent",
+  "agents", "salt", "salts", "acid", "acids", "base", "bases", "metal", "metals", "resin", "organism", "organisms",
+  "cell", "cells", "bacteria", "virus", "viruses", "protein", "proteins", "peptide", "peptides", "antibody", "antibodies",
+  "gene", "genes", "sequence", "water", "buffer", "excipient", "carrier", "host", "patient", "animal", "mouse", "rat",
+  "human", "microorganism", "microorganisms",
+]);
+
+export function absorbFindings(base: Scan, found: PageFinding): Scan {
+  const chemicals = [...base.chemicals];
+  for (const item of found.chemicals) {
+    const name = cleanName(item.name, 160);
+    const cas = /^\d{2,7}-\d{2}-\d$/.test(item.cas) ? item.cas : "";
+    const formula = cleanFormula(item.formula);
+    if (!name || (VAGUE.has(name.toLowerCase()) && !cas && !formula)) continue;
+    const key = cas ? `cas:${cas}` : `name:${name.toLowerCase().replace(/[^a-z0-9]+/g, "")}`;
+    const index = chemicals.findIndex((chemical) => chemicalKey(chemical) === key || chemical.name.toLowerCase() === name.toLowerCase());
+    if (index >= 0) {
+      const current = chemicals[index];
+      if (!current) continue;
+      chemicals[index] = {
+        ...current,
+        name: current.name.startsWith("CAS ") ? name : current.name,
+        formula: current.formula || formula,
+        cas: current.cas || cas,
+        note: joinNote(current.note, item.note),
+      };
+      continue;
+    }
+    const known = CHEMICALS.find((chemical) => chemical.name.toLowerCase() === name.toLowerCase());
+    chemicals.push(
+      known
+        ? {
+            name: known.name,
+            formula: known.formula ?? formula,
+            smiles: known.smiles ?? "",
+            cas: known.cas ?? cas,
+            links: chemicalLinks(known),
+            note: item.note,
+          }
+        : {
+            name,
+            formula,
+            smiles: "",
+            cas,
+            links: looseChemicalLinks(name, cas),
+            note: item.note,
+          },
+    );
+  }
+
+  const organisms = [...base.organisms];
+  for (const item of found.organisms) {
+    const name = cleanName(item.name);
+    if (!name || VAGUE.has(name.toLowerCase())) continue;
+    if (organisms.some((organism) => organism.name.toLowerCase() === name.toLowerCase())) {
+      const current = organisms.find((organism) => organism.name.toLowerCase() === name.toLowerCase());
+      if (current && item.note && !current.note.includes(item.note)) current.note = joinNote(current.note, item.note);
+      continue;
+    }
+    organisms.push({ name, href: wikiSearch(name), note: item.note || "Named in the text" });
+  }
+
+  const materials = [...base.materials];
+  for (const item of found.materials) {
+    const name = cleanName(item.name);
+    if (!name || VAGUE.has(name.toLowerCase())) continue;
+    if (materials.some((material) => material.name.toLowerCase() === name.toLowerCase())) continue;
+    const known = MATERIALS.find((material) => material.name.toLowerCase() === name.toLowerCase());
+    materials.push({
+      name,
+      href: known ? wikiUrl(known.wiki) : wikiSearch(name),
+      note: item.note || "Named in the text",
+    });
+  }
+
+  const technologies = [...base.technologies];
+  for (const item of found.technologies) {
+    const name = cleanName(item.name, 80);
+    if (!name || VAGUE.has(name.toLowerCase())) continue;
+    if (technologies.some((technology) => technology.name.toLowerCase() === name.toLowerCase())) continue;
+    const known = TECHNOLOGIES.find((technology) => technology.name.toLowerCase() === name.toLowerCase());
+    technologies.push({
+      name,
+      href: known ? wikiUrl(known.wiki) : wikiSearch(name),
+      note: item.note || "Named in the text",
+    });
+  }
+
+  return {
+    technologies: technologies.slice(0, 24),
+    chemicals: chemicals.slice(0, 80),
+    organisms: organisms.slice(0, 40),
+    materials: materials.slice(0, 40),
+  };
+}
+
+function chemicalKey(item: ChemicalHit): string {
+  if (item.cas) return `cas:${item.cas}`;
+  return `name:${item.name.toLowerCase().replace(/[^a-z0-9]+/g, "")}`;
+}
+
+function cleanName(value: string, max = 80): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  if (clean.length < 2 || clean.length > max) return "";
+  if (/[.!?]$/.test(clean) && clean.split(" ").length > 12) return "";
+  return clean;
+}
+
+function cleanFormula(value: string): string {
+  const clean = value.replace(/\s+/g, "").trim();
+  if (!clean || clean.length > 40) return "";
+  if (!/[A-Za-z]/.test(clean) || !/\d/.test(clean)) return "";
+  return clean;
+}
+
+function joinNote(left?: string, right?: string): string {
+  const parts = [left, right].map((item) => item?.trim() ?? "").filter(Boolean);
+  return [...new Set(parts)].join(" · ").slice(0, 160);
+}
+
+function chemspiderUrl(query: string): string {
+  const term = query.replace(/^CAS\s+/i, "").trim();
+  return `https://www.chemspider.com/search?q=${encodeURIComponent(term)}`;
+}
+
+function looseChemicalLinks(name: string, cas: string): ChemicalHit["links"] {
+  const query = cas || name;
+  const links = [
+    { label: "Wikipedia", href: wikiSearch(name) },
+    { label: "PubChem", href: `https://pubchem.ncbi.nlm.nih.gov/#query=${encodeURIComponent(query)}` },
+    { label: "ChemSpider", href: chemspiderUrl(cas || name) },
+  ];
+  if (cas) links.push({ label: "CAS", href: `https://commonchemistry.cas.org/detail?cas_rn=${cas}` });
+  return links;
 }

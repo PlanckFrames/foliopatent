@@ -70,6 +70,7 @@ export type ChemicalHit = {
   smiles: string;
   cas: string;
   links: { label: string; href: string }[];
+  note?: string;
 };
 
 export type NamedLink = {

@@ -14,10 +14,10 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { explainPatent, lookupPatent } from "@/lib/patent/server-fns";
-import { biblioFromPdf, collectNumbers, collectParties, extractPdfText, findPublicationId, type FaceParty } from "@/lib/patent/pdf";
-import { detectLanguage, scanText } from "@/lib/patent/scan";
-import { displayClaimNumber, filingPlace, grokUrl, patentUrl, wikiSearch } from "@/lib/patent/text";
+import { explainPatent, lookupPatent, readPatentPages, translateFrontMatter } from "@/lib/patent/server-fns";
+import { biblioFromPdf, collectNumbers, collectParties, extractPdfText, findPublicationId, inventorColumns, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
+import { absorbFindings, detectLanguage, scanText, type PageFinding } from "@/lib/patent/scan";
+import { displayClaimNumber, filingPlace, grokUrl, patentUrl, plainClaimBullets, readingChunksFromExcerpt, selectReadingPages, wikiSearch, type ReadingPage } from "@/lib/patent/text";
 import type { Brief, OfficialRecord, PatentNumber, Scan } from "@/lib/patent/types";
 
 const SAMPLES = [
@@ -57,7 +57,10 @@ const FEATURES = [
   "Where it was filed",
   "Related cases",
   "Plain-language summaries",
+  "Full English translation",
 ];
+
+type ShownClaim = { number: string; text: string; original: string; independent: boolean };
 
 type Report = {
   record: OfficialRecord | null;
@@ -65,8 +68,15 @@ type Report = {
   brief: Brief;
   note: string;
   numbers: PatentNumber[];
-  writtenClaims: { number: string; text: string; independent: boolean }[];
+  writtenClaims: ShownClaim[];
   parties: Record<FaceParty["role"], FaceParty[]>;
+  displayTitle: string;
+  originalTitle: string;
+  displayAbstract: string;
+  originalAbstract: string;
+  frontTranslated: boolean;
+  languageLabel: string;
+  translatedPages: { page: number; english: string }[];
 };
 
 type Tab = {
@@ -139,6 +149,7 @@ export function FolioApp() {
     try {
       let pdfText = "";
       let pdfNote = "";
+      let pageTexts: string[] = [];
       let id = options.file ? "" : typed;
       if (options.file) {
         const extracted = await extractPdfText(options.file, (message) => {
@@ -147,12 +158,13 @@ export function FolioApp() {
         });
         if (!liveTabs.current.has(tabId)) return;
         pdfText = extracted.text;
+        pageTexts = extracted.pageTexts;
         if (!pdfText.trim()) {
           throw new Error("This PDF could not be read. Type the publication number, or upload a clearer file.");
         }
         const where = extracted.scanned ? "scan" : "PDF";
         pdfNote = extracted.truncated
-          ? `Read the first ${extracted.scanned ? 24 : 50} pages of the ${where} in this browser. The file was not uploaded.`
+          ? `Read the first ${extracted.scanned ? 40 : 50} pages of the ${where} in this browser. The file was not uploaded.`
           : `Read the uploaded ${where} in this browser. The file was not uploaded.`;
         id = findPublicationId(pdfText);
       }
@@ -173,7 +185,8 @@ export function FolioApp() {
       const excerptBiblio = record?.excerpt ? biblioFromPdf(record.excerpt) : { abstract: "", background: "", claims: [] };
       const abstract = record?.abstract || pdfBiblio.abstract || excerptBiblio.abstract;
       const background = pdfBiblio.background || excerptBiblio.background;
-      const writtenClaims =
+      const sourceTitle = record?.title || titleFromPdf(pdfText) || fileLabel || "Uploaded patent";
+      const sourceClaims =
         record && record.claims.length > 0
           ? record.claims.map((claim) => ({
               number: displayClaimNumber(claim.number),
@@ -185,22 +198,147 @@ export function FolioApp() {
               text: claim.text,
               independent: true,
             }));
-      const scanSource = [pdfText, record?.excerpt ?? ""].filter(Boolean).join("\n").slice(0, 180_000);
-      const language = detectLanguage([abstract, background, scanSource.slice(0, 1500)].filter(Boolean).join("\n"));
-      const scan = scanText(scanSource, {
+      const picked = pageTexts.length > 0 ? selectReadingPages(pageTexts) : readingChunksFromExcerpt(record?.excerpt || [abstract, background].filter(Boolean).join("\n"));
+      let reading: ReadingPage[] = picked.pages;
+      let examplesTruncated = picked.examplesTruncated;
+      if (pageTexts.length > 0 && !reading.some((page) => page.example) && record?.excerpt) {
+        const fromRecord = readingChunksFromExcerpt(record.excerpt);
+        const examples = fromRecord.pages.filter((page) => page.example);
+        if (examples.length > 0) {
+          reading = [...reading.slice(0, 8), ...examples];
+          examplesTruncated = fromRecord.examplesTruncated;
+        }
+      }
+      const exampleCount = reading.filter((page) => page.example).length;
+      const spoken = detectLanguage(
+        (reading.filter((page) => page.example).map((page) => page.text).join("\n") || reading.map((page) => page.text).join("\n")).slice(0, 2500) ||
+          abstract,
+      );
+      const frontLanguage = detectLanguage([sourceTitle, abstract, sourceClaims.map((claim) => claim.text).join(" ")].join("\n"));
+      const fromRecord = !options.file;
+
+      let displayTitle = sourceTitle;
+      let displayAbstract = abstract;
+      let writtenClaims: ShownClaim[] = sourceClaims.map((claim) => ({ ...claim, original: "" }));
+      let frontTranslated = false;
+      if (frontLanguage.code !== "en" && (sourceTitle || abstract || sourceClaims.length > 0)) {
+        patchTab(tabId, { status: "Translating the title, abstract, and every claim…" });
+        const groups: typeof sourceClaims[] = [];
+        for (let index = 0; index < sourceClaims.length; index += 6) groups.push(sourceClaims.slice(index, index + 6));
+        if (groups.length === 0) groups.push([]);
+        for (let index = 0; index < groups.length; index += 1) {
+          if (!liveTabs.current.has(tabId)) return;
+          const group = groups[index] ?? [];
+          if (groups.length > 1) {
+            const first = group[0]?.number ?? "";
+            const last = group[group.length - 1]?.number ?? "";
+            patchTab(tabId, { status: `Translating claims ${first}–${last}…` });
+          }
+          const part = await translateFrontMatter({
+            data: {
+              language: frontLanguage.code,
+              languageLabel: frontLanguage.label,
+              title: index === 0 ? sourceTitle : "",
+              abstract: index === 0 ? abstract : "",
+              claims: group.map((claim) => ({ number: claim.number, text: claim.text })),
+            },
+          });
+          if (!liveTabs.current.has(tabId)) return;
+          if (index === 0) {
+            displayTitle = part.title || displayTitle;
+            displayAbstract = part.abstract || displayAbstract;
+          }
+          if (part.translated) {
+            frontTranslated = true;
+            writtenClaims = writtenClaims.map((claim) => {
+              const next = part.claims.find((item) => displayClaimNumber(item.number) === claim.number);
+              if (!next || next.text === claim.text) return claim;
+              return { ...claim, text: next.text, original: claim.original || sourceClaims.find((item) => item.number === claim.number)?.text || claim.text };
+            });
+          }
+        }
+      }
+
+      const findings: PageFinding = { chemicals: [], organisms: [], materials: [], technologies: [] };
+      const translatedPages: { page: number; english: string }[] = [];
+      const missed: number[] = [];
+      let readerUnavailable = false;
+      const unit = fromRecord ? "section" : "page";
+      const batches: ReadingPage[][] = [];
+      for (let index = 0; index < reading.length; ) {
+        const size = reading[index]?.example ? 2 : 3;
+        batches.push(reading.slice(index, index + size));
+        index += size;
+      }
+      for (const batch of batches) {
+        if (!liveTabs.current.has(tabId)) return;
+        const start = batch[0]?.page ?? 0;
+        const end = batch[batch.length - 1]?.page ?? start;
+        const span = start === end ? `${unit} ${start}` : `${unit}s ${start}–${end}`;
+        const exampleBatch = batch.every((page) => page.example);
+        const batchLanguage = detectLanguage(batch.map((page) => page.text).join("\n").slice(0, 2500) || abstract);
+        patchTab(tabId, {
+          status:
+            batchLanguage.code === "en"
+              ? `Reading ${exampleBatch ? "experimental " : ""}${span} for technologies, chemicals, organisms, and materials…`
+              : `Translating ${exampleBatch ? "experimental " : ""}${span}…`,
+        });
+        const part = await readPatentPages({
+          data: {
+            language: batchLanguage.code,
+            languageLabel: batchLanguage.label,
+            pages: batch.map((page) => ({ page: page.page, text: page.text, example: page.example })),
+          },
+        }).catch(() => null);
+        if (!liveTabs.current.has(tabId)) return;
+        if (!part || part.unavailable) {
+          readerUnavailable = true;
+          missed.push(...batch.map((page) => page.page));
+          continue;
+        }
+        translatedPages.push(...part.pages);
+        findings.chemicals.push(...part.chemicals);
+        findings.organisms.push(...part.organisms);
+        findings.materials.push(...part.materials);
+        findings.technologies.push(...part.technologies);
+      }
+
+      const englishBody = translatedPages.map((page) => page.english).join("\n");
+      const scanSource = [englishBody, pdfText, record?.excerpt ?? ""].filter(Boolean).join("\n").slice(0, 180_000);
+      const glossary = scanText(scanSource, {
         classifications: record?.classifications,
         keywords: record?.keywords,
       });
+      const scan = absorbFindings(glossary, findings);
+      let pageNote = pageReadingNote({
+        pages: reading.length,
+        translated: translatedPages.length,
+        unavailable: readerUnavailable && findings.chemicals.length + findings.organisms.length + findings.materials.length + findings.technologies.length === 0,
+        missed: missed.length,
+        extra: examplesTruncated ? 1 : 0,
+        examples: exampleCount,
+        fromRecord,
+        languageLabel: spoken.label,
+      });
+      if (frontLanguage.code !== "en" && !frontTranslated) {
+        pageNote = [pageNote, "The title, abstract, and claims could not be translated, so the original wording is shown."]
+          .filter(Boolean)
+          .join(" ");
+      }
 
       patchTab(tabId, { status: "Writing a plain-language brief…" });
+      const briefClaims = [...writtenClaims.filter((claim) => claim.independent), ...writtenClaims.filter((claim) => !claim.independent)].slice(0, 16);
       const brief = await explainPatent({
         data: {
-          title: record?.title || fileLabel || "Uploaded patent",
-          abstract,
+          title: displayTitle,
+          abstract: displayAbstract,
           background,
-          claims: writtenClaims.map((claim) => ({ number: claim.number, text: claim.text })),
-          context: (background || record?.excerpt || pdfText).slice(0, 1800),
-          language: language.code,
+          claims: briefClaims.map((claim) => ({
+            number: claim.number,
+            text: claim.text,
+          })),
+          context: (englishBody || background || record?.excerpt || pdfText).slice(0, 1800),
+          language: "en",
         },
       });
       if (!liveTabs.current.has(tabId)) return;
@@ -213,10 +351,17 @@ export function FolioApp() {
           record,
           scan,
           brief,
-          note: [pdfNote, ...(record?.sourceNotes ?? [])].filter(Boolean).join(" · "),
+          note: [pdfNote, pageNote, ...(record?.sourceNotes ?? [])].filter(Boolean).join(" · "),
           numbers: collectNumbers(record, pdfText),
           writtenClaims,
           parties: collectParties(record, pdfText),
+          displayTitle,
+          originalTitle: sourceTitle,
+          displayAbstract,
+          originalAbstract: abstract,
+          frontTranslated,
+          languageLabel: frontLanguage.label,
+          translatedPages,
         },
       });
       if (options.file) setPublicationId(record?.id || id || "");
@@ -373,13 +518,45 @@ export function FolioApp() {
         {active?.report ? <ReportView report={active.report} /> : null}
 
         <footer className="mt-16 border-t border-line pt-6 text-sm leading-relaxed text-muted">
-          PDFs and scans stay on this device. The reader covers the major patent languages. Lookup uses the configured patent
-          services, then the public patent page. The plain-language brief sends the title, abstract or background, and a few
-          claims, and answers in simple English.
+          PDFs and scans stay on this device. Every page that is read is translated into English when it is not already
+          English, including experimental and example sections. The title, abstract, and claims are translated in full.
+          Technologies, chemicals, organisms, and materials are taken from those pages, including the examples. A
+          plain-language brief follows the translation.
         </footer>
       </main>
     </div>
   );
+}
+
+function pageReadingNote(input: {
+  pages: number;
+  translated: number;
+  unavailable: boolean;
+  missed: number;
+  extra: number;
+  examples: number;
+  fromRecord: boolean;
+  languageLabel: string;
+}): string {
+  if (input.pages === 0) return "";
+  const noun = input.fromRecord ? "section" : "page";
+  if (input.unavailable) {
+    return "The page-by-page reader was unavailable, so technologies, chemicals, organisms, and materials use the English glossary only.";
+  }
+  const tail = [
+    input.examples > 0
+      ? `${input.examples} ${noun}${input.examples === 1 ? "" : "s"} of experimental examples were included.`
+      : "",
+    input.missed > 0 ? `${input.missed} ${noun}${input.missed === 1 ? "" : "s"} could not be read.` : "",
+    input.extra > 0 ? "Later example pages were not all sent." : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const lead =
+    input.translated > 0
+      ? `Translated ${input.translated} ${input.translated === 1 ? noun : `${noun}s`} from ${input.languageLabel}. Technologies, chemicals, organisms, and materials are taken from that English text, including the examples.`
+      : `Read ${input.pages} ${input.pages === 1 ? noun : `${noun}s`} and listed the technologies, chemicals, organisms, and materials named there, including any examples.`;
+  return [lead, tail].filter(Boolean).join(" ");
 }
 
 function ReportView({ report }: { report: Report }) {
@@ -402,9 +579,15 @@ function ReportView({ report }: { report: Report }) {
 
       <div className="min-w-0">
       <h2 className="font-serif text-3xl leading-tight tracking-tight sm:text-4xl">
-        {record?.title ?? "Text from the uploaded PDF"}
+        {report.displayTitle || record?.title || "Text from the uploaded PDF"}
       </h2>
+      {report.frontTranslated && report.originalTitle && report.originalTitle !== report.displayTitle ? (
+        <p className="mt-2 text-sm leading-relaxed text-muted">Original title: {report.originalTitle}</p>
+      ) : null}
       <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-muted">
+        {report.frontTranslated ? (
+          <span className="rounded-full bg-wash px-3 py-1 font-semibold text-ink">Translated from {report.languageLabel}</span>
+        ) : null}
         {record?.status ? <span className="rounded-full bg-wash px-3 py-1 font-semibold text-ink">{record.status}</span> : null}
         {record ? (
           <a className="underline decoration-line underline-offset-4" href={patentUrl(record.id)} target="_blank" rel="noreferrer">
@@ -447,27 +630,37 @@ function ReportView({ report }: { report: Report }) {
           <PartyList items={report.parties.Applicant} empty="No applicant was listed separately from the assignee." />
         </Section>
         <Section n={sectionNumber("inventor")} id="inventor" title="Inventor" icon={<Users className="size-4" />}>
-          <PartyList items={report.parties.Inventor} empty="No inventor was listed on the public record or the PDF front page." />
+          <InventorTable items={report.parties.Inventor} />
         </Section>
         <Section n={sectionNumber("assignee")} id="assignee" title="Assignee" icon={<Layers className="size-4" />}>
           <PartyList items={report.parties.Assignee} empty="No assignee or patent holder was identified." />
         </Section>
         <Section n={sectionNumber("purpose")} id="purpose" title="Purpose" icon={<ScrollText className="size-4" />}>
-          <p className="text-sm font-semibold text-copper">Abstract & Background</p>
-          {hasAbstract && hasBackground ? (
-            <>
-              <p className="mt-3 text-sm font-semibold">Abstract</p>
-              <p className="mt-1 text-lg leading-relaxed">{report.brief.abstractSummary}</p>
-              <p className="mt-4 text-sm font-semibold">Background</p>
-              <p className="mt-1 text-lg leading-relaxed">{report.brief.backgroundSummary}</p>
-            </>
+          <p className="text-sm font-semibold text-copper">Abstract</p>
+          {report.displayAbstract ? (
+            <p className="mt-2 text-lg leading-relaxed">{report.displayAbstract}</p>
           ) : hasAbstract || hasBackground ? (
             <p className="mt-2 text-lg leading-relaxed">{report.brief.abstractSummary || report.brief.backgroundSummary}</p>
           ) : (
-            <p className="mt-2 leading-relaxed text-muted">No abstract or background was available to summarize.</p>
+            <p className="mt-2 leading-relaxed text-muted">No abstract was available.</p>
           )}
-          <p className="mt-5 text-sm font-semibold text-copper">The patent</p>
+          {report.frontTranslated && report.originalAbstract && report.originalAbstract !== report.displayAbstract ? (
+            <details className="mt-3">
+              <summary className="cursor-pointer text-sm text-muted">Original abstract</summary>
+              <p className="mt-2 text-sm leading-relaxed text-muted">{report.originalAbstract}</p>
+            </details>
+          ) : null}
+          {hasBackground ? (
+            <>
+              <p className="mt-5 text-sm font-semibold text-copper">Background</p>
+              <p className="mt-2 leading-relaxed">{report.brief.backgroundSummary}</p>
+            </>
+          ) : null}
+          <p className="mt-5 text-sm font-semibold text-copper">In plain language</p>
           <p className="mt-2 text-lg leading-relaxed">{report.brief.patentSummary}</p>
+          {report.brief.source === "brief" && report.brief.abstractSummary ? (
+            <p className="mt-3 leading-relaxed text-muted">{report.brief.abstractSummary}</p>
+          ) : null}
         </Section>
         <Section n={sectionNumber("claims")} id="claims" title="Claims" icon={<ScrollText className="size-4" />}>
           {report.writtenClaims.length > 0 ? (
@@ -476,23 +669,31 @@ function ReportView({ report }: { report: Report }) {
                 const notes =
                   report.brief.claimNotes.find((note) => displayClaimNumber(note.number) === displayClaimNumber(claim.number))?.bullets ??
                   [];
+                const bullets = (notes.length > 0 ? notes : plainClaimBullets(claim.text)).slice(0, 3);
                 return (
-                  <li key={`${claim.number}-${claim.text.slice(0, 24)}`} className="grid gap-3 border-b border-line pb-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(13rem,0.75fr)] lg:gap-6">
-                    <p className="leading-relaxed">
-                      <span className="mr-2 font-mono text-sm text-copper">{displayClaimNumber(claim.number)}</span>{" "}
-                      {claim.text}
-                    </p>
-                    {notes.length > 0 ? (
-                      <ul className="grid content-start gap-2 text-sm leading-snug">
-                        {notes.slice(0, 3).map((note) => (
-                          <li key={note} className="rounded-xl bg-wash px-3 py-2">
-                            {note}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="rounded-xl bg-wash px-3 py-2 text-sm leading-snug text-muted">No plain-language summary for this claim.</p>
-                    )}
+                  <li
+                    key={`${claim.number}-${claim.text.slice(0, 24)}`}
+                    className="grid gap-3 border-b border-line pb-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(13rem,0.75fr)] lg:gap-6"
+                  >
+                    <div>
+                      <p className="leading-relaxed">
+                        <span className="mr-2 font-mono text-sm text-copper">{displayClaimNumber(claim.number)}</span>
+                        {claim.text}
+                      </p>
+                      {claim.original && claim.original !== claim.text ? (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-sm text-muted">Original claim</summary>
+                          <p className="mt-2 text-sm leading-relaxed text-muted">{claim.original}</p>
+                        </details>
+                      ) : null}
+                    </div>
+                    <ul className="grid content-start gap-2 text-sm leading-snug">
+                      {bullets.map((note) => (
+                        <li key={note} className="rounded-xl bg-wash px-3 py-2">
+                          {note}
+                        </li>
+                      ))}
+                    </ul>
                   </li>
                 );
               })}
@@ -515,6 +716,7 @@ function ReportView({ report }: { report: Report }) {
                       .filter(Boolean)
                       .join(" · ") || "Name only"}
                   </p>
+                  {item.note ? <p className="mt-1 text-sm text-muted">{item.note}</p> : null}
                   <p className="mt-2 flex flex-wrap gap-3 text-sm">
                     {item.links.map((link) => (
                       <a key={link.label} className="underline decoration-line underline-offset-4" href={link.href} target="_blank" rel="noreferrer">
@@ -620,6 +822,19 @@ function ReportView({ report }: { report: Report }) {
             <Empty>No continuation, division, or later family application was listed.</Empty>
           )}
         </Section>
+        {report.translatedPages.length > 0 ? (
+          <details className="rounded-2xl border border-line bg-card p-4 sm:p-5">
+            <summary className="cursor-pointer font-serif text-2xl tracking-tight">English text, page by page</summary>
+            <div className="mt-4 grid gap-4">
+              {report.translatedPages.map((page) => (
+                <article key={page.page} className="border-t border-line pt-3">
+                  <h4 className="font-mono text-sm text-copper">Page {page.page}</h4>
+                  <p className="mt-2 whitespace-pre-wrap leading-relaxed">{page.english}</p>
+                </article>
+              ))}
+            </div>
+          </details>
+        ) : null}
       </div>
       </div>
     </article>
@@ -640,6 +855,27 @@ function Section({ n, id, title, icon, children }: { n: number; id: string; titl
       </h3>
       <div className="mt-3">{children}</div>
     </section>
+  );
+}
+
+function InventorTable({ items }: { items: FaceParty[] }) {
+  const rows = inventorColumns(items);
+  if (rows.length === 0) return <Empty>No inventor was listed on the public record or the PDF front page.</Empty>;
+  return (
+    <div className="overflow-x-auto">
+      <div className="grid min-w-[22rem] grid-cols-2 gap-x-4 border-b border-line pb-2 text-sm text-muted">
+        <span>On the PDF</span>
+        <span>Translated</span>
+      </div>
+      <ul>
+        {rows.map((row) => (
+          <li key={`${row.printed}-${row.translated}`} className="grid min-w-[22rem] grid-cols-2 gap-x-4 border-b border-line py-2">
+            <span>{row.printed}</span>
+            <span className="font-semibold">{row.translated}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

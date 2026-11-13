@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { parseGooglePatent } from "./parse-google";
 import { fetchSerpRecord } from "./serp";
-import { firstSentences, displayClaimNumber, normalizePublicationId, publicationCandidates } from "./text";
+import { firstSentences, displayClaimNumber, normalizePublicationId, plainClaimBullets, publicationCandidates } from "./text";
 import type { Brief, ClaimNote, LookupInput, OfficialRecord } from "./types";
 
 const pageCache = new Map<string, { at: number; html: string }>();
@@ -227,29 +227,16 @@ type BriefInput = {
 
 const briefCache = new Map<string, Brief>();
 
-const STOP_WORDS = new Set([
-  "the", "and", "for", "with", "that", "this", "from", "into", "over", "under", "than", "then", "such", "also", "only",
-  "each", "any", "are", "was", "were", "been", "being", "have", "has", "had", "not", "but", "its", "their", "said",
-  "wherein", "comprising", "according", "claim", "claims", "method", "use", "using", "which", "wherein",
-]);
-
-function contentWords(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter((word) => word.length > 3 && !STOP_WORDS.has(word));
-}
-
 function tooClose(bullet: string, claim: string): boolean {
   const source = claim.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ");
   const flat = bullet.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  if (!flat) return true;
   if (flat.length > 40 && source.includes(flat)) return true;
-  const words = contentWords(bullet);
-  if (words.length < 4) return false;
-  const claimSet = new Set(contentWords(claim));
-  const shared = words.filter((word) => claimSet.has(word)).length;
-  return shared / words.length > 0.62;
+  const words = flat.split(" ").filter(Boolean);
+  for (let index = 0; index + 8 <= words.length; index += 1) {
+    if (source.includes(words.slice(index, index + 8).join(" "))) return true;
+  }
+  return false;
 }
 
 function extractiveBrief(input: BriefInput): Brief {
@@ -260,9 +247,9 @@ function extractiveBrief(input: BriefInput): Brief {
     abstractSummary,
     backgroundSummary,
     patentSummary: firstSentences(seed, 5) || "The patent text that was read was too short to summarize.",
-    claimNotes: input.claims.slice(0, 8).map((claim, index) => ({
+    claimNotes: input.claims.slice(0, 16).map((claim, index) => ({
       number: displayClaimNumber(claim.number || String(index + 1)),
-      bullets: [],
+      bullets: plainClaimBullets(claim.text),
     })),
     source: "extract",
   };
@@ -285,7 +272,7 @@ function acceptNotes(claims: BriefClaim[], parsed: ModelBrief): { notes: ClaimNo
     const raw = Array.isArray(match?.bullets) ? match.bullets.map((item) => String(item).trim()).filter(Boolean) : [];
     const bullets = raw.filter((item) => !tooClose(item, claim.text)).slice(0, 3).map((item) => item.slice(0, 280));
     if (raw.length > 0 && bullets.length === 0) quoted += 1;
-    return { number: wanted, bullets };
+    return { number: wanted, bullets: bullets.length > 0 ? bullets : plainClaimBullets(claim.text) };
   });
   return { notes, quoted };
 }
@@ -300,7 +287,7 @@ async function askModel(apiKey: string, data: BriefInput, stricter: boolean): Pr
     body: JSON.stringify({
       model: "grok-4.5",
       temperature: stricter ? 0.4 : 0.2,
-      max_tokens: 1800,
+      max_tokens: 3200,
       messages: [
         {
           role: "system",
@@ -342,7 +329,7 @@ export const explainPatent = createServerFn({ method: "POST" })
     title: (input.title ?? "").slice(0, 300),
     abstract: (input.abstract ?? "").slice(0, 3500),
     background: (input.background ?? "").slice(0, 3500),
-    claims: (input.claims ?? []).slice(0, 8).map((claim) => ({
+    claims: (input.claims ?? []).slice(0, 16).map((claim) => ({
       number: String(claim.number ?? "").slice(0, 8),
       text: String(claim.text ?? "").slice(0, 900),
     })),
@@ -389,4 +376,247 @@ export const explainPatent = createServerFn({ method: "POST" })
     } catch {
       return fallback;
     }
+  });
+
+type FrontClaim = { number: string; text: string };
+
+type FrontInput = {
+  language: string;
+  languageLabel: string;
+  title: string;
+  abstract: string;
+  claims: FrontClaim[];
+};
+
+export type FrontTranslation = {
+  title: string;
+  abstract: string;
+  claims: FrontClaim[];
+  translated: boolean;
+};
+
+type PageInput = {
+  language: string;
+  languageLabel: string;
+  pages: { page: number; text: string; example?: boolean }[];
+};
+
+export type PageReading = {
+  pages: { page: number; english: string }[];
+  chemicals: { name: string; formula: string; cas: string; note: string }[];
+  organisms: { name: string; note: string }[];
+  materials: { name: string; note: string }[];
+  technologies: { name: string; note: string }[];
+  translated: boolean;
+  unavailable: boolean;
+};
+
+const translationCache = new Map<string, unknown>();
+
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(raw.slice(start, end + 1)) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function askJson(apiKey: string, system: string, user: string, maxTokens: number): Promise<Record<string, unknown> | null> {
+  for (const jsonMode of [true, false]) {
+    try {
+      const response = await fetch("https://api.x.ai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: "grok-4.5",
+          temperature: 0.1,
+          max_tokens: maxTokens,
+          ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+        }),
+        signal: AbortSignal.timeout(55_000),
+      });
+      if (!response.ok) continue;
+      const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+      const parsed = parseJsonObject(body.choices?.[0]?.message?.content ?? "");
+      if (parsed) return parsed;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function cacheGet<T>(key: string): T | null {
+  return translationCache.has(key) ? (translationCache.get(key) as T) : null;
+}
+
+function cacheSet(key: string, value: unknown) {
+  if (translationCache.size > 40) translationCache.clear();
+  translationCache.set(key, value);
+}
+
+function asText(value: unknown, max: number): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+export const translateFrontMatter = createServerFn({ method: "POST" })
+  .validator((input: FrontInput): FrontInput => ({
+    language: (input.language ?? "en").slice(0, 12),
+    languageLabel: (input.languageLabel ?? "the source language").slice(0, 40),
+    title: (input.title ?? "").slice(0, 400),
+    abstract: (input.abstract ?? "").slice(0, 5000),
+    claims: (input.claims ?? []).slice(0, 6).map((claim) => ({
+      number: String(claim.number ?? "").slice(0, 8),
+      text: String(claim.text ?? "").slice(0, 2200),
+    })),
+  }))
+  .handler(async ({ data }): Promise<FrontTranslation> => {
+    const original: FrontTranslation = {
+      title: data.title,
+      abstract: data.abstract,
+      claims: data.claims,
+      translated: false,
+    };
+    if (data.language === "en" || (!data.title && !data.abstract && data.claims.length === 0)) return original;
+    const apiKey = process.env.XAI_API_KEY;
+    if (!apiKey) return original;
+    const key = `front|${data.language}|${data.title}|${data.abstract.slice(0, 80)}|${data.claims.map((claim) => claim.number + claim.text.length).join(",")}`;
+    const cached = cacheGet<FrontTranslation>(key);
+    if (cached) return cached;
+    const parsed = await askJson(
+      apiKey,
+      "You translate patents into English. Translate completely. Do not summarize, shorten, or drop clauses, numerals, chemical names, or reference numbers. Return only JSON.",
+      `Source language: ${data.languageLabel}
+Title: ${data.title || "(none)"}
+
+Abstract:
+${data.abstract || "(none)"}
+
+Claims:
+${data.claims.map((claim) => `${displayClaimNumber(claim.number)}. ${claim.text}`).join("\n\n") || "(none)"}
+
+Return {"title":"","abstract":"","claims":[{"number":"1","text":""}]}.
+If a field was empty, return an empty string. Keep every claim number. If the text is already English, copy it unchanged.`,
+      4500,
+    );
+    if (!parsed) return original;
+    const claims = Array.isArray(parsed.claims) ? parsed.claims : [];
+    const translatedClaims = data.claims.map((claim, index) => {
+      const wanted = displayClaimNumber(claim.number || String(index + 1));
+      const match =
+        claims.find((item) => {
+          const row = item as { number?: unknown };
+          return displayClaimNumber(String(row.number ?? "")) === wanted;
+        }) ?? claims[index];
+      const row = (match ?? {}) as { text?: unknown };
+      const text = asText(row.text, 4000);
+      return { number: wanted, text: text.length > 20 ? text : claim.text };
+    });
+    const result: FrontTranslation = {
+      title: asText(parsed.title, 400) || data.title,
+      abstract: asText(parsed.abstract, 5000) || data.abstract,
+      claims: translatedClaims,
+      translated: true,
+    };
+    cacheSet(key, result);
+    return result;
+  });
+
+function findingList(value: unknown, kind: "chemical" | "name"): { name: string; formula: string; cas: string; note: string }[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      const row = (item ?? {}) as { name?: unknown; formula?: unknown; cas?: unknown; note?: unknown };
+      return {
+        name: asText(row.name, kind === "chemical" ? 160 : 80),
+        formula: kind === "chemical" ? asText(row.formula, 40) : "",
+        cas: kind === "chemical" ? asText(row.cas, 20) : "",
+        note: asText(row.note, 80),
+      };
+    })
+    .filter((item) => item.name.length > 2);
+}
+
+export const readPatentPages = createServerFn({ method: "POST" })
+  .validator((input: PageInput): PageInput => ({
+    language: (input.language ?? "en").slice(0, 12),
+    languageLabel: (input.languageLabel ?? "the source language").slice(0, 40),
+    pages: (input.pages ?? [])
+      .slice(0, 3)
+      .map((page) => ({
+        page: Number.isFinite(Number(page.page)) ? Number(page.page) : 0,
+        text: String(page.text ?? "").slice(0, 5500),
+        example: Boolean(page.example),
+      }))
+      .filter((page) => page.text.trim().length > 40),
+  }))
+  .handler(async ({ data }): Promise<PageReading> => {
+    const empty: PageReading = {
+      pages: [],
+      chemicals: [],
+      organisms: [],
+      materials: [],
+      technologies: [],
+      translated: false,
+      unavailable: false,
+    };
+    if (data.pages.length === 0) return empty;
+    const apiKey = process.env.XAI_API_KEY;
+    if (!apiKey) return { ...empty, unavailable: true };
+    const key = `pages|${data.language}|${data.pages.map((page) => `${page.page}:${page.example ? "x" : ""}:${page.text.length}:${page.text.slice(0, 48)}`).join("|")}`;
+    const cached = cacheGet<PageReading>(key);
+    if (cached) return cached;
+    const english = data.language === "en";
+    const examples = data.pages.some((page) => page.example);
+    const body = data.pages.map((page) => `--- page ${page.page}${page.example ? " (experimental example)" : ""} ---\n${page.text}`).join("\n\n");
+    const lists = `Return {"pages":${english ? "[]" : '[{"page":1,"english":""}]'},"chemicals":[{"name":"","formula":"","cas":"","note":""}],"organisms":[{"name":"","note":""}],"materials":[{"name":"","note":""}],"technologies":[{"name":"","note":""}]}.
+A chemical is a named substance, drug, reagent, solvent, catalyst, polymer, salt, or element, including every compound prepared or tested in an example. An organism is a species, strain, cell line, or virus. A material is a named composite, alloy, resin, ceramic, fibre, or construction material. A technology is a named method, instrument, assay, or process used in the work, such as HPLC, NMR, lyophilization, or spray drying. In an experimental or example section, list every one of these, not a sample. Skip vague words such as solution, compound, or cells. formula and cas stay empty unless printed. note is "example" when the name comes from an example, otherwise the page number.`;
+    const parsed = await askJson(
+      apiKey,
+      english
+        ? "You list every specific chemical, organism, material, and technology named in patent text, especially in experimental examples. Do not invent names, formulas, or CAS numbers. Return only JSON."
+        : "You translate each patent page into complete English, including every experimental example, then list every specific chemical, organism, material, and technology named on it. Do not summarize an example. Do not invent names, formulas, or CAS numbers. Return only JSON.",
+      english
+        ? `${body}
+
+These pages are already English. Do not repeat them.
+${examples ? "These pages are experimental examples. List every compound, reagent, organism, material, and technique they use.\n" : ""}${lists}`
+        : `Source language: ${data.languageLabel}
+
+${body}
+
+${lists}
+english must be the full translation of that page, with every sentence of any example kept. Do not shorten it.`,
+      english ? (examples ? 3600 : 2200) : 5000,
+    );
+    if (!parsed) return { ...empty, unavailable: true };
+    const pageRows = Array.isArray(parsed.pages) ? parsed.pages : [];
+    const pages = english
+      ? []
+      : data.pages.map((page) => {
+          const match =
+            pageRows.find((item) => Number((item as { page?: unknown }).page) === page.page) ??
+            pageRows[data.pages.indexOf(page)];
+          const englishText = String((match as { english?: unknown } | undefined)?.english ?? "").trim();
+          return { page: page.page, english: englishText.slice(0, 8000) };
+        }).filter((page) => page.english.length > 40);
+    const result: PageReading = {
+      pages,
+      chemicals: findingList(parsed.chemicals, "chemical"),
+      organisms: findingList(parsed.organisms, "name").map((item) => ({ name: item.name, note: item.note })),
+      materials: findingList(parsed.materials, "name").map((item) => ({ name: item.name, note: item.note })),
+      technologies: findingList(parsed.technologies, "name").map((item) => ({ name: item.name, note: item.note })),
+      translated: pages.length > 0,
+      unavailable: false,
+    };
+    cacheSet(key, result);
+    return result;
   });

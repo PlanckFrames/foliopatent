@@ -3,7 +3,7 @@ import { detectScanLanguage } from "./scan";
 import type { OfficialRecord, PatentNumber } from "./types";
 
 const TEXT_PAGE_LIMIT = 50;
-const SCAN_PAGE_LIMIT = 24;
+const SCAN_PAGE_LIMIT = 40;
 const SPARSE_CHARS = 40;
 
 type TextItem = { str?: string };
@@ -23,6 +23,7 @@ type PdfDoc = {
 
 export type PdfExtract = {
   text: string;
+  pageTexts: string[];
   pages: number;
   truncated: boolean;
   scanned: boolean;
@@ -47,6 +48,7 @@ export async function extractPdfText(file: File, onProgress?: (message: string) 
   if (!scanned) {
     return {
       text: pages.join("\n"),
+      pageTexts: keepPages(pages),
       pages: doc.numPages,
       truncated: doc.numPages > textLimit,
       scanned: false,
@@ -63,6 +65,7 @@ export async function extractPdfText(file: File, onProgress?: (message: string) 
   }
   return {
     text,
+    pageTexts: keepPages(scannedPages),
     pages: doc.numPages,
     truncated: doc.numPages > scanLimit,
     scanned: true,
@@ -75,6 +78,10 @@ function itemsToLine(items: TextItem[]): string {
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function keepPages(pages: string[]): string[] {
+  return pages.map((page) => page.replace(/\s+/g, " ").trim()).filter((page) => page.length >= 80);
 }
 
 async function readScan(doc: PdfDoc, pageCount: number, onProgress?: (message: string) => void): Promise<string[]> {
@@ -369,6 +376,63 @@ export function collectParties(record: OfficialRecord | null, pdfText: string): 
   return buckets;
 }
 
+export function inventorColumns(parties: FaceParty[]): { printed: string; translated: string }[] {
+  const rows = new Map<string, { printed: string; translated: string; printedScore: number }>();
+  for (const party of parties) {
+    const key = personKey(party.name);
+    if (!key) continue;
+    const printedScore = printedScoreOf(party.name);
+    const translated = readingOrderName(party.name);
+    const current = rows.get(key);
+    if (!current) {
+      rows.set(key, { printed: party.name, translated, printedScore });
+      continue;
+    }
+    if (printedScore > current.printedScore) {
+      current.printed = party.name;
+      current.printedScore = printedScore;
+    }
+    if (translated.length > current.translated.length) current.translated = translated;
+  }
+  return [...rows.values()].map(({ printed, translated }) => ({ printed, translated }));
+}
+
+function personKey(name: string): string {
+  const comma = name.match(/^([^,]+),\s*(.+)$/);
+  const surname = comma ? comma[1] : (name.trim().split(/\s+/).pop() ?? "");
+  const given = comma ? comma[2] : name.trim().split(/\s+/).slice(0, -1).join(" ");
+  const fold = (value: string) =>
+    value
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z]/g, "");
+  const surnameKey = fold(surname);
+  if (surnameKey.length < 2) return "";
+  return `${surnameKey}|${fold(given)}`;
+}
+
+function printedScoreOf(name: string): number {
+  let score = 0;
+  if (name.includes(",")) score += 2;
+  if (/[A-Z]{3,}/.test(name)) score += 1;
+  return score;
+}
+
+function readingOrderName(name: string): string {
+  const comma = name.match(/^([^,]+),\s*(.+)$/);
+  if (!comma) return titlePerson(name);
+  return `${titlePerson(comma[2] ?? "")} ${titlePerson(comma[1] ?? "")}`.replace(/\s+/g, " ").trim();
+}
+
+function titlePerson(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/(^|[^a-z])([a-z])/g, (_, separator: string, letter: string) => `${separator}${letter.toUpperCase()}`)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function numbersFromText(text: string): PatentNumber[] {
   const head = text.slice(0, 12_000);
   const flat = head.replace(/\s+/g, " ");
@@ -430,26 +494,52 @@ export type PdfBiblio = {
   claims: { number: string; text: string }[];
 };
 
+export function titleFromPdf(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const marked = flat.match(
+    /\(\s*54\s*\)\s*(.{8,220}?)(?=\(\s*\d{2}\s*\)|\b(?:abstract|sammendrag|opfinder|inventor|applicant|ansøger|ansoeger)\b)/i,
+  );
+  return marked?.[1]?.replace(/\s+/g, " ").trim() ?? "";
+}
+
 export function biblioFromPdf(text: string): PdfBiblio {
   const flat = text.replace(/\s+/g, " ");
-  const abstractMatch = flat.match(/\babstract\b(.{40,1800}?)(?=\b(?:claims|background|field of the invention|description|technical field)\b)/i);
-  const claimZone = flat.split(/\bwhat is claimed is\b|\bclaims\b/i)[1] ?? "";
+  const claimZone = claimZoneFrom(flat).slice(0, 80_000);
   const claims: { number: string; text: string }[] = [];
   const claimRe = /(?:\[(\d{1,5})\]|(?:^|\s)(\d{1,4})\.)\s+(.*?)(?=(?:\s\[\d{1,5}\]|\s\d{1,4}\.)\s|$)/g;
   for (const match of claimZone.matchAll(claimRe)) {
     const body = (match[3] ?? "").trim();
-    if (body.length < 40) continue;
-    const independent = !/\b(of|to|in|according to)\s+claims?\s+\d+/i.test(body);
-    if (independent || claims.length < 2) {
-      claims.push({ number: displayClaimNumber(match[1] || match[2] || String(claims.length + 1)), text: body.slice(0, 900) });
-    }
-    if (claims.length >= 4) break;
+    if (body.length < 30) continue;
+    claims.push({
+      number: displayClaimNumber(match[1] || match[2] || String(claims.length + 1)),
+      text: body.slice(0, 2200),
+    });
+    if (claims.length >= 40) break;
   }
   return {
-    abstract: (abstractMatch?.[1] ?? "").trim(),
+    abstract: pullAbstract(flat),
     background: pullBackground(flat),
     claims,
   };
+}
+
+function claimZoneFrom(flat: string): string {
+  const markers = [
+    ...flat.matchAll(
+      /\b(what is claimed is|patentkrav|revendications|patentanspr[uü]che|reivindicaciones|rivendicazioni|权利要求|特許請求の範囲|청구항)\b/gi,
+    ),
+  ];
+  const claims = markers.length > 0 ? markers : [...flat.matchAll(/\bclaims\b/gi)];
+  const last = claims[claims.length - 1];
+  if (!last || last.index == null) return "";
+  return flat.slice(last.index + last[0].length);
+}
+
+function pullAbstract(flat: string): string {
+  const match = flat.match(
+    /\b(?:abstract|sammendrag|zusammenfassung|abr[eé]g[eé]|resumen|riassunto|sammanfattning|sammandrag)\b[:\s]{0,8}(.{40,4500}?)(?=\b(?:claims|background|field of the invention|description|technical field|patentkrav|revendications|patentanspr|reivindicaciones|what is claimed)\b)/i,
+  );
+  return (match?.[1] ?? "").replace(/\s+/g, " ").trim();
 }
 
 function pullBackground(flat: string): string {
