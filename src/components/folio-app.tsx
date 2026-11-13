@@ -26,7 +26,6 @@ const SAMPLES = [
 ];
 
 const SECTIONS = [
-  { id: "title", title: "Title" },
   { id: "numbers", title: "Patent numbers" },
   { id: "dates", title: "Dates" },
   { id: "applicant", title: "Applicant" },
@@ -61,12 +60,27 @@ const FEATURES = [
 function chooseTitle(pdfTitle: string, recordTitle: string, fallback: string): string {
   const fromPdf = clipTitle(pdfTitle);
   const fromRecord = cleanTitle(recordTitle);
+  if (fromRecord && titleCovers(fromRecord, fromPdf) && fromRecord.length > fromPdf.length + 8) return fromRecord;
   if (fromPdf && !titleLooksMixed(fromPdf)) return fromPdf;
   return fromRecord || fromPdf || fallback;
 }
 
+function titleCovers(longer: string, shorter: string): boolean {
+  if (!shorter) return true;
+  const words = shorter.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((word) => word.length > 2);
+  const hay = longer.toLowerCase();
+  const hit = words.filter((word) => hay.includes(word)).length;
+  return words.length > 0 && hit / words.length >= 0.6;
+}
+
 function titleLooksMixed(title: string): boolean {
   return /\d{1,3}[,.]\d{3}[,.]\d{3}|\.{4,}|\b(?:19|20)\d{2}\b/.test(title);
+}
+
+function proseIntact(text: string): boolean {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (clean.length < 40) return false;
+  return !/\(\s*5[0-9]\s*\)|references cited|patent documents|\d{1,3}[,.]\d{3}[,.]\d{3}/i.test(clean);
 }
 
 function assertEnglish(sample: string) {
@@ -190,8 +204,10 @@ export function FolioApp() {
 
       const pdfBiblio = pdfText ? biblioFromPdf(pdfText) : { abstract: "", background: "", claims: [] };
       const excerptBiblio = record?.excerpt ? biblioFromPdf(record.excerpt) : { abstract: "", background: "", claims: [] };
-      const abstract = pdfBiblio.abstract || record?.abstract || excerptBiblio.abstract;
-      const backgroundSource = pdfBiblio.background || excerptBiblio.background;
+      const pdfAbstract = pdfBiblio.abstract;
+      const recordAbstract = record?.abstract || excerptBiblio.abstract;
+      const abstract = proseIntact(pdfAbstract) ? pdfAbstract : recordAbstract || pdfAbstract;
+      const backgroundSource = proseIntact(pdfBiblio.background) ? pdfBiblio.background : proseIntact(excerptBiblio.background) ? excerptBiblio.background : "";
       const background = samePassage(abstract, backgroundSource) ? "" : backgroundSource;
       const title = chooseTitle(titleFromPdf(pdfText), record?.title ?? "", fileLabel || "Uploaded patent");
       const claims: ShownClaim[] =
@@ -419,7 +435,7 @@ function ReportView({ report }: { report: Report }) {
         <h2 className="font-serif text-3xl leading-tight tracking-tight sm:text-4xl">{report.title || record?.title || "Text from the uploaded PDF"}</h2>
         <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-muted">
           <span className="rounded-full bg-wash px-3 py-1 font-semibold text-ink">English</span>
-          {record?.status ? <span className="rounded-full bg-wash px-3 py-1 font-semibold text-ink">{record.status}</span> : null}
+          {record?.status ? <span className="rounded-full bg-wash px-3 py-1 font-semibold text-ink">Patent Status: {record.status}</span> : null}
           {record ? (
             <a className="underline decoration-line underline-offset-4" href={patentUrl(record.id)} target="_blank" rel="noreferrer">
               Public record
@@ -429,9 +445,6 @@ function ReportView({ report }: { report: Report }) {
         {report.note ? <p className="mt-3 text-sm text-muted">{report.note}</p> : null}
 
         <div className="mt-6 grid gap-4">
-          <Section n={sectionNumber("title")} id="title" title="Title" icon={<ScrollText className="size-4" />}>
-            <p className="leading-relaxed">{report.title || "No title was found."}</p>
-          </Section>
           <Section n={sectionNumber("numbers")} id="numbers" title="Patent numbers" icon={<Hash className="size-4" />}>
             {report.numbers.length > 0 ? (
               <dl className="grid gap-2">

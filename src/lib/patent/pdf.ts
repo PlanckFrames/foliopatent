@@ -235,7 +235,7 @@ export function textInColumns(words: PlacedWord[], pageWidth: number): string {
 }
 
 function findGutter(words: PlacedWord[], pageWidth: number): number | null {
-  const buckets = 40;
+  const buckets = 50;
   const counts = new Array<number>(buckets).fill(0);
   for (const word of words) {
     const center = (word.x + word.x1) / 2;
@@ -243,17 +243,22 @@ function findGutter(words: PlacedWord[], pageWidth: number): number | null {
     counts[index] += 1;
   }
   let best = -1;
-  let bestCount = Infinity;
-  for (let index = 14; index <= 26; index += 1) {
-    const window = (counts[index - 1] ?? 0) + (counts[index] ?? 0) + (counts[index + 1] ?? 0);
-    if (window < bestCount) {
-      bestCount = window;
+  let bestScore = Infinity;
+  for (let index = 12; index <= 36; index += 1) {
+    const gap = (counts[index - 1] ?? 0) + (counts[index] ?? 0) + (counts[index + 1] ?? 0);
+    const leftWing = counts.slice(Math.max(0, index - 8), index - 1).reduce((sum, count) => sum + count, 0);
+    const rightWing = counts.slice(index + 2, index + 9).reduce((sum, count) => sum + count, 0);
+    if (leftWing < 6 || rightWing < 6) continue;
+    const score = gap / (leftWing + rightWing);
+    if (score < bestScore) {
+      bestScore = score;
       best = index;
     }
   }
-  const left = counts.slice(0, 14).reduce((sum, count) => sum + count, 0);
-  const right = counts.slice(27).reduce((sum, count) => sum + count, 0);
-  if (best < 0 || left < 12 || right < 12 || bestCount > (left + right) * 0.08) return null;
+  if (best < 0 || bestScore > 0.45) return null;
+  const left = counts.slice(0, best).reduce((sum, count) => sum + count, 0);
+  const right = counts.slice(best + 1).reduce((sum, count) => sum + count, 0);
+  if (left < 15 || right < 15) return null;
   return ((best + 0.5) / buckets) * pageWidth;
 }
 
@@ -437,9 +442,14 @@ export function partiesFromText(text: string): FaceParty[] {
 }
 
 function namesFromBlob(blob: string): string[] {
-  const cut = (blob.split(/\s+\(\d{1,2}\)\s*/)[0] ?? blob).trim();
+  const cut = ((blob.split(/\s+\(\d{1,2}\)\s*/)[0] ?? blob).split(/\d{1,3}[,.]\d{3}[,.]\d{3}|\b[A-HY]\d{2}[A-Z]\b|\*/)[0] ?? blob).trim();
   const pieces = cut.split(/\s+(?=(?:[A-Z]{2,}|[A-Z]'[A-Z]{2,}),\s+[A-Z])/);
-  return pieces.map(cleanPartyName).filter((name) => name.length > 2);
+  return pieces.map(cleanPartyName).filter((name) => name.length > 2 && !garbledName(name));
+}
+
+export function garbledName(name: string): boolean {
+  if (/[*]|\d{3,}|\/\d{2,}|\b[A-HY]\d{2}[A-Z]\b/i.test(name)) return true;
+  return name.split(/\s+/).some((word) => /^[A-Z0-9]{4,}$/.test(word) && !/^(?:INC|LLC|LTD|CORP|GMBH|COMPANY)$/.test(word));
 }
 
 function cleanPartyName(raw: string): string {
@@ -460,7 +470,7 @@ export function collectParties(record: OfficialRecord | null, pdfText: string): 
   const seen = new Set<string>();
   const add = (role: FaceParty["role"], name: string, note: string) => {
     const clean = name.replace(/\s+/g, " ").trim();
-    if (clean.length < 2) return;
+    if (clean.length < 2 || garbledName(clean)) return;
     const key = `${role}|${clean.toLowerCase()}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -599,7 +609,7 @@ export function titleFromPdf(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
   const named = flat.match(/发明名称\s*[:：]?\s*(.{4,160}?)(?=\s*(?:摘要|发明人|申请人|专利权人|技术领域|背景技术|\(\s*\d{2}\s*\))|$)/);
   const marked = flat.match(
-    /\(\s*54\s*\)\s*(.{4,220}?)(?=\(\s*\d{2}\s*\)|发明名称|摘要|\b(?:abstract|inventor|applicant)\b)/i,
+    /\(\s*54\s*\)\s*((?:(?!\(\s*\d{2}\s*\)).){4,280}?)(?=\(\s*\d{2}\s*\)|发明名称|摘要|\b(?:abstract|inventor|applicant|assignee)\b)/i,
   );
   return clipTitle(named?.[1] || marked?.[1] || "");
 }
