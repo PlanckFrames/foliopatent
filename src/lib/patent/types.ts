@@ -97,6 +97,7 @@ export type Scan = {
   chemicals: ChemicalHit[];
   organisms: NamedLink[];
   materials: NamedLink[];
+  classes: Classification[];
 };
 
 export type LookupInput = {

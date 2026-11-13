@@ -175,8 +175,8 @@ const CHEMICAL_NAME = new RegExp(
 );
 const DRUG_STEM =
   /\b([A-Za-z][a-z]{2,}(?:olol|sartan|vastatin|statin|cillin|mycin|cycline|prazole|dipine|azepam|oxetine|gliptin|flozin|lukast|profen|navir|ciclib|tinib|setron|conazole|thiazide|fibrate|barbital|caine|tidine|afil|mustine|rubicin|taxel|platin|glutide|natide|paratide|zenatide))\b/g;
-const NAMED_CODE = /\b([A-Za-z][a-z]{4,}-\d{1,4})\b/g;
-const FORMULA = /\b((?:[A-Z][a-z]?\d{0,3}){2,10})\b/g;
+const FRAGMENT_NAME =
+  /^(?:methyl|ethyl|propyl|butyl|pentyl|hexyl|heptyl|octyl|phenyl|vinyl|allyl|least|most|between|about|alpha|beta|gamma|carbon|group|component|polymer)-\d+$/i;
 const GENERIC_CHEMICAL = new Set([
   "amino acid", "nucleic acid", "fatty acid", "organic acid", "inorganic acid", "the acid", "said acid", "an acid",
   "the oxide", "the salt", "said salt", "the ester", "the amide", "the amine", "the alcohol", "the ether",
@@ -185,7 +185,6 @@ const CHEMICAL_HEAD_STOP = new Set([
   "the", "said", "such", "this", "that", "any", "each", "organic", "inorganic", "fatty", "amino", "nucleic", "dilute",
   "concentrated", "aqueous", "strong", "weak", "suitable", "preferred", "corresponding", "respective", "optional",
 ]);
-const CODE_STOP = new Set(["figure", "table", "example", "claim", "step", "page", "formula", "scheme", "chart", "item", "group", "type", "seq"]);
 
 function parseChemicals(text: string): { name: string; formula: string; cas: string; note: string }[] {
   const found: { name: string; formula: string; cas: string; note: string }[] = [];
@@ -194,6 +193,7 @@ function parseChemicals(text: string): { name: string; formula: string; cas: str
     const clean = trimChemicalName(name);
     const key = clean.toLowerCase();
     if (clean.length < 3 || seen.has(key) || GENERIC_CHEMICAL.has(key) || VAGUE.has(key)) return;
+    if (!plausibleChemicalName(clean) && !cas && !isChemicalFormula(formula || clean)) return;
     if (CHEMICAL_HEAD_STOP.has(key.split(/[\s-]/)[0] ?? "")) return;
     seen.add(key);
     found.push({ name: clean, formula, cas, note });
@@ -205,15 +205,10 @@ function parseChemicals(text: string): { name: string; formula: string; cas: str
   }
   for (const match of text.matchAll(CHEMICAL_NAME)) add(match[1] ?? "");
   for (const match of text.matchAll(DRUG_STEM)) add(match[1] ?? "");
-  for (const match of text.matchAll(NAMED_CODE)) {
-    const name = match[1] ?? "";
-    if (CODE_STOP.has(name.split("-")[0]?.toLowerCase() ?? "")) continue;
-    add(name);
-  }
   for (const smiles of explicitSmiles(text)) add(`SMILES ${smiles}`, "", "", "SMILES string in the text");
-  for (const match of text.matchAll(FORMULA)) {
+  for (const match of text.matchAll(/\b([A-Z][A-Za-z0-9]{1,24})\b/g)) {
     const formula = match[1] ?? "";
-    if (!/\d/.test(formula) || formula.length > 24 || /^[A-Z]\d{4,}$/.test(formula)) continue;
+    if (!isChemicalFormula(formula)) continue;
     add(formula, formula, "", "Formula in the text");
   }
   return found;
@@ -233,6 +228,39 @@ function casChecksum(cas: string): boolean {
   const body = digits.slice(0, -1).split("").reverse();
   const sum = body.reduce((total, digit, index) => total + Number(digit) * (index + 1), 0);
   return sum % 10 === check;
+}
+
+export function isIpcCode(value: string): boolean {
+  return /^[A-HY]\d{2}[A-Z](?:\d{1,4}\/\d{2,6})?$/i.test(value.replace(/\s+/g, ""));
+}
+
+export function isChemicalFormula(value: string): boolean {
+  const clean = value.replace(/\s+/g, "");
+  if (clean.length < 2 || clean.length > 30 || isIpcCode(clean) || !/\d/.test(clean)) return false;
+  if (/^C\d{1,3}H\d{1,3}[A-Za-z0-9()]*$/.test(clean)) return true;
+  if (/^(?:H2O|CO2|NO2|SO2|SO3|NH3|HCl)$/.test(clean)) return true;
+  return /[a-z]/.test(clean) && /[A-Z]/.test(clean) && /^[A-Za-z0-9()]+$/.test(clean);
+}
+
+export function plausibleChemicalName(name: string): boolean {
+  const clean = name.replace(/\s+/g, " ").trim();
+  if (clean.length < 3 || FRAGMENT_NAME.test(clean)) return false;
+  if (isIpcCode(clean)) return false;
+  if (/^[A-Z0-9]{2,6}$/.test(clean) && !isChemicalFormula(clean)) return false;
+  return true;
+}
+
+export function parseIpcCodes(text: string): { code: string; description: string }[] {
+  const found: { code: string; description: string }[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/\b([A-HY]\d{2}[A-Z])(?:\s*(\d{1,4})\s*\/\s*(\d{2,6}))?\b/g)) {
+    const main = (match[1] ?? "").toUpperCase();
+    const code = match[2] && match[3] ? `${main} ${match[2]}/${match[3]}` : main;
+    if (seen.has(code)) continue;
+    seen.add(code);
+    found.push({ code, description: "" });
+  }
+  return found;
 }
 
 const LATIN_EPITHET = /^(?:[a-z]{4,}(?:ensis|oides|icola|iana|ianus|icus|ica|orum|arum|ens)|[a-z]{3,}(?:ii|iae|ae|us|um|is|i))$/;
@@ -385,28 +413,46 @@ export function scanText(text: string, extras?: { classifications?: { code: stri
     const known = TECHNOLOGIES.find((item) => item.name.toLowerCase() === keyword.toLowerCase());
     if (known) pushTech(linkFor(known.name, known.wiki, "Indexing keyword"));
   }
-  for (const classification of extras?.classifications ?? []) {
-    pushTech({
-      name: `${classification.code} · ${toTitle(classification.description)}`,
-      href: wikiSearch(classification.description),
-      note: "Patent classification",
+
+  const classes = mergeClasses(extras?.classifications ?? [], parseIpcCodes(text));
+  for (const material of materials) {
+    if (chemicals.some((chemical) => chemical.name.toLowerCase() === material.name.toLowerCase())) continue;
+    if (chemicals.some((chemical) => chemical.name.toLowerCase().startsWith(`${material.name.toLowerCase()} `))) continue;
+    chemicals.push({
+      name: material.name,
+      formula: "",
+      smiles: "",
+      cas: "",
+      links: [
+        { label: "Wikipedia", href: material.href },
+        { label: "PubChem", href: `https://pubchem.ncbi.nlm.nih.gov/#query=${encodeURIComponent(material.name)}` },
+      ],
+      note: material.note || "Polymer or material named in the text",
     });
   }
-
-  const listedMaterials = materials.filter(
-    (item) => !chemicals.some((chemical) => chemical.name.toLowerCase().startsWith(`${item.name.toLowerCase()} `)),
-  );
   return {
     technologies: technologies.slice(0, 24),
-    chemicals: chemicals.slice(0, 80),
+    chemicals: chemicals.filter((item) => plausibleChemicalName(item.name) || isChemicalFormula(item.formula) || item.cas).slice(0, 80),
     organisms: organisms.slice(0, 40),
-    materials: listedMaterials.slice(0, 40),
+    materials: [],
+    classes,
   };
 }
 
-function toTitle(value: string): string {
-  const lower = value.toLowerCase();
-  return lower.charAt(0).toUpperCase() + lower.slice(1);
+function mergeClasses(
+  listed: { code: string; description: string }[],
+  parsed: { code: string; description: string }[],
+): { code: string; description: string }[] {
+  const found: { code: string; description: string }[] = [];
+  const seen = new Set<string>();
+  for (const item of [...listed, ...parsed]) {
+    const code = item.code.replace(/\s+/g, " ").trim().toUpperCase();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    found.push({ code, description: item.description.replace(/\s+/g, " ").trim() });
+  }
+  const detailed = new Set(found.filter((item) => item.code.includes(" ")).map((item) => item.code.split(" ")[0]));
+  return found.filter((item) => item.code.includes(" ") || !detailed.has(item.code)).slice(0, 40);
 }
 
 type LatinHint = { code: string; tess: string; label: string; pattern: string };
@@ -506,8 +552,9 @@ export function absorbFindings(base: Scan, found: PageFinding): Scan {
   for (const item of found.chemicals) {
     const name = cleanName(item.name, 160);
     const cas = /^\d{2,7}-\d{2}-\d$/.test(item.cas) ? item.cas : "";
-    const formula = cleanFormula(item.formula);
-    if (!name || (VAGUE.has(name.toLowerCase()) && !cas && !formula)) continue;
+    const formula = isChemicalFormula(item.formula) ? cleanFormula(item.formula) : "";
+    if (!name || isIpcCode(name) || (!plausibleChemicalName(name) && !cas && !formula)) continue;
+    if (VAGUE.has(name.toLowerCase()) && !cas && !formula) continue;
     const key = cas ? `cas:${cas}` : `name:${name.toLowerCase().replace(/[^a-z0-9]+/g, "")}`;
     const index = chemicals.findIndex((chemical) => chemicalKey(chemical) === key || chemical.name.toLowerCase() === name.toLowerCase());
     if (index >= 0) {
@@ -568,6 +615,20 @@ export function absorbFindings(base: Scan, found: PageFinding): Scan {
       note: item.note || "Named in the text",
     });
   }
+  for (const material of materials) {
+    if (chemicals.some((chemical) => chemical.name.toLowerCase() === material.name.toLowerCase())) continue;
+    chemicals.push({
+      name: material.name,
+      formula: "",
+      smiles: "",
+      cas: "",
+      links: [
+        { label: "Wikipedia", href: material.href },
+        { label: "PubChem", href: `https://pubchem.ncbi.nlm.nih.gov/#query=${encodeURIComponent(material.name)}` },
+      ],
+      note: material.note || "Polymer or material named in the text",
+    });
+  }
 
   const technologies = [...base.technologies];
   for (const item of found.technologies) {
@@ -586,7 +647,8 @@ export function absorbFindings(base: Scan, found: PageFinding): Scan {
     technologies: technologies.slice(0, 24),
     chemicals: chemicals.slice(0, 80),
     organisms: organisms.slice(0, 40),
-    materials: materials.slice(0, 40),
+    materials: [],
+    classes: base.classes ?? [],
   };
 }
 

@@ -17,7 +17,7 @@ import {
 import { explainPatent, lookupPatent, readPatentPages, translateFrontMatter } from "@/lib/patent/server-fns";
 import { biblioFromPdf, collectNumbers, collectParties, extractPdfText, findPublicationId, inventorColumns, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
 import { absorbFindings, detectLanguage, scanText, type PageFinding } from "@/lib/patent/scan";
-import { displayClaimNumber, filingPlace, grokUrl, patentUrl, plainClaimBullets, readingChunksFromExcerpt, samePassage, selectReadingPages, wikiSearch, type ReadingPage } from "@/lib/patent/text";
+import { displayClaimNumber, filingPlace, grokUrl, patentUrl, readingChunksFromExcerpt, samePassage, selectReadingPages, wikiSearch, type ReadingPage } from "@/lib/patent/text";
 import type { Brief, OfficialRecord, PatentNumber, Scan } from "@/lib/patent/types";
 
 const SAMPLES = [
@@ -34,9 +34,9 @@ const SECTIONS = [
   { id: "purpose", title: "Purpose" },
   { id: "claims", title: "Claims" },
   { id: "technologies", title: "Technologies" },
+  { id: "classes", title: "Classifications" },
   { id: "chemicals", title: "Chemicals" },
   { id: "organisms", title: "Organisms" },
-  { id: "materials", title: "Materials" },
   { id: "citations", title: "Cited patents" },
   { id: "office", title: "Where filed" },
   { id: "family", title: "Filed elsewhere" },
@@ -59,6 +59,16 @@ const FEATURES = [
   "Plain-language summaries",
   "Full English translation",
 ];
+
+const USELESS_SUMMARY = /^(states what this claim protects|covers a mixture or formulation|covers a way of doing something|covers a device|covers a use of the invention|adds a further requirement)/i;
+
+function fieldNeedsTranslation(text: string): boolean {
+  const sample = text.replace(/\s+/g, " ").trim();
+  if (sample.length < 8) return false;
+  if (/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0600-\u06ff\u0590-\u05ff\u0e00-\u0e7f\u0400-\u04ff\u0370-\u03ff]/.test(sample)) return true;
+  if (sample.length < 80) return false;
+  return detectLanguage(sample).code !== "en";
+}
 
 type ShownClaim = { number: string; text: string; original: string; independent: boolean };
 
@@ -215,18 +225,24 @@ export function FolioApp() {
         (reading.filter((page) => page.example).map((page) => page.text).join("\n") || reading.map((page) => page.text).join("\n")).slice(0, 2500) ||
           abstract,
       );
-      const frontLanguage = detectLanguage([sourceTitle, abstract, sourceClaims.map((claim) => claim.text).join(" ")].join("\n"));
       const fromRecord = !options.file;
 
       let displayTitle = sourceTitle;
       let displayAbstract = abstract;
-      let writtenClaims: ShownClaim[] = sourceClaims.map((claim) => ({ ...claim, original: "" }));
+      let writtenClaims: ShownClaim[] = sourceClaims.map((claim) => ({ ...claim, original: claim.text }));
       let frontTranslated = false;
-      if (frontLanguage.code !== "en" && (sourceTitle || abstract || sourceClaims.length > 0)) {
+      const translateTitle = fieldNeedsTranslation(sourceTitle);
+      const translateAbstract = fieldNeedsTranslation(abstract);
+      const foreignClaims = sourceClaims.filter((claim) => fieldNeedsTranslation(claim.text));
+      const frontLanguage = detectLanguage(
+        foreignClaims.map((claim) => claim.text).join("\n").slice(0, 2500) || (translateAbstract ? abstract : sourceTitle),
+      );
+      if (translateTitle || translateAbstract || foreignClaims.length > 0) {
         patchTab(tabId, { status: "Translating the title, abstract, and every claim…" });
         const groups: typeof sourceClaims[] = [];
-        for (let index = 0; index < sourceClaims.length; index += 6) groups.push(sourceClaims.slice(index, index + 6));
+        for (let index = 0; index < foreignClaims.length; index += 6) groups.push(foreignClaims.slice(index, index + 6));
         if (groups.length === 0) groups.push([]);
+        const language = frontLanguage.code === "en" ? "zh" : frontLanguage.code;
         for (let index = 0; index < groups.length; index += 1) {
           if (!liveTabs.current.has(tabId)) return;
           const group = groups[index] ?? [];
@@ -237,24 +253,24 @@ export function FolioApp() {
           }
           const part = await translateFrontMatter({
             data: {
-              language: frontLanguage.code,
-              languageLabel: frontLanguage.label,
-              title: index === 0 ? sourceTitle : "",
-              abstract: index === 0 ? abstract : "",
+              language,
+              languageLabel: frontLanguage.label === "English" ? "the source language" : frontLanguage.label,
+              title: index === 0 && translateTitle ? sourceTitle : "",
+              abstract: index === 0 && translateAbstract ? abstract : "",
               claims: group.map((claim) => ({ number: claim.number, text: claim.text })),
             },
           });
           if (!liveTabs.current.has(tabId)) return;
           if (index === 0) {
-            displayTitle = part.title || displayTitle;
-            displayAbstract = part.abstract || displayAbstract;
+            if (translateTitle && part.title && !fieldNeedsTranslation(part.title)) displayTitle = part.title;
+            if (translateAbstract && part.abstract && !fieldNeedsTranslation(part.abstract)) displayAbstract = part.abstract;
           }
           if (part.translated) {
             frontTranslated = true;
             writtenClaims = writtenClaims.map((claim) => {
               const next = part.claims.find((item) => displayClaimNumber(item.number) === claim.number);
-              if (!next || next.text === claim.text) return claim;
-              return { ...claim, text: next.text, original: claim.original || sourceClaims.find((item) => item.number === claim.number)?.text || claim.text };
+              if (!next || next.text === claim.text || fieldNeedsTranslation(next.text)) return claim;
+              return { ...claim, text: next.text, original: claim.original || claim.text };
             });
           }
         }
@@ -339,7 +355,7 @@ export function FolioApp() {
             text: claim.text,
           })),
           context: (englishBody || background || record?.excerpt || pdfText).slice(0, 1800),
-          language: "en",
+          language: writtenClaims.some((claim) => fieldNeedsTranslation(claim.text)) ? frontLanguage.code : "en",
         },
       });
       if (!liveTabs.current.has(tabId)) return;
@@ -660,10 +676,11 @@ function ReportView({ report }: { report: Report }) {
             <p className="mt-2 leading-relaxed text-muted">No background section was found.</p>
           )}
           <p className="mt-5 text-sm font-semibold text-copper">In plain language</p>
-          <p className="mt-2 text-lg leading-relaxed">{report.brief.patentSummary}</p>
-          {report.brief.source === "brief" && report.brief.abstractSummary && !samePassage(report.brief.abstractSummary, abstractText) ? (
-            <p className="mt-3 leading-relaxed text-muted">{report.brief.abstractSummary}</p>
-          ) : null}
+          {report.brief.patentSummary ? (
+            <p className="mt-2 text-lg leading-relaxed">{report.brief.patentSummary}</p>
+          ) : (
+            <p className="mt-2 leading-relaxed text-muted">A plain-language summary of the whole patent was not written. The abstract above is the source text, not a summary.</p>
+          )}
         </Section>
         <Section n={sectionNumber("claims")} id="claims" title="Claims" icon={<ScrollText className="size-4" />}>
           {report.writtenClaims.length > 0 ? (
@@ -672,31 +689,38 @@ function ReportView({ report }: { report: Report }) {
                 const notes =
                   report.brief.claimNotes.find((note) => displayClaimNumber(note.number) === displayClaimNumber(claim.number))?.bullets ??
                   [];
-                const bullets = (notes.length > 0 ? notes : plainClaimBullets(claim.text)).slice(0, 3);
+                const bullets = notes
+                  .filter((note) => note.trim().length > 11 && !USELESS_SUMMARY.test(note) && !fieldNeedsTranslation(note))
+                  .slice(0, 3);
+                const original = claim.original || claim.text;
+                const translated = original !== claim.text && !fieldNeedsTranslation(claim.text);
                 return (
-                  <li
-                    key={`${claim.number}-${claim.text.slice(0, 24)}`}
-                    className="grid gap-3 border-b border-line pb-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(13rem,0.75fr)] lg:gap-6"
-                  >
-                    <div>
-                      <p className="leading-relaxed">
-                        <span className="mr-2 font-mono text-sm text-copper">{displayClaimNumber(claim.number)}</span>
-                        {claim.text}
-                      </p>
-                      {claim.original && claim.original !== claim.text ? (
-                        <details className="mt-2">
-                          <summary className="cursor-pointer text-sm text-muted">Original claim</summary>
-                          <p className="mt-2 text-sm leading-relaxed text-muted">{claim.original}</p>
-                        </details>
-                      ) : null}
+                  <li key={`${claim.number}-${original.slice(0, 24)}`} className="border-b border-line pb-4">
+                    <p className="font-mono text-sm text-copper">{displayClaimNumber(claim.number)}</p>
+                    <div className="mt-2 grid gap-3 lg:grid-cols-3">
+                      <div>
+                        <p className="text-sm font-semibold text-copper">Original</p>
+                        <p className="mt-1 leading-relaxed">{original}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm font-semibold text-copper">English</p>
+                        <p className="mt-1 leading-relaxed">{translated ? claim.text : fieldNeedsTranslation(original) ? "This claim was not translated." : "Already in English."}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm font-semibold text-copper">Summary</p>
+                        {bullets.length > 0 ? (
+                          <ul className="mt-1 grid gap-2 text-sm leading-snug">
+                            {bullets.map((note) => (
+                              <li key={note} className="rounded-xl bg-wash px-3 py-2">
+                                {note}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="mt-1 text-sm text-muted">No separate summary was written for this claim.</p>
+                        )}
+                      </div>
                     </div>
-                    <ul className="grid content-start gap-2 text-sm leading-snug">
-                      {bullets.map((note) => (
-                        <li key={note} className="rounded-xl bg-wash px-3 py-2">
-                          {note}
-                        </li>
-                      ))}
-                    </ul>
                   </li>
                 );
               })}
@@ -706,7 +730,23 @@ function ReportView({ report }: { report: Report }) {
           )}
         </Section>
         <Section n={sectionNumber("technologies")} id="technologies" title="Technologies" icon={<Search className="size-4" />}>
-          <TechList items={report.scan.technologies} empty="No named methods, instruments, or classification codes were found in the text that was read." />
+          <TechList items={report.scan.technologies} empty="No named methods or instruments were found in the text that was read." />
+        </Section>
+        <Section n={sectionNumber("classes")} id="classes" title="Classifications" icon={<Hash className="size-4" />}>
+          {report.scan.classes.length > 0 ? (
+            <ul className="grid gap-2">
+              {report.scan.classes.map((item) => (
+                <li key={item.code} className="grid gap-1 border-b border-line py-2 sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-3">
+                  <a className="font-mono text-sm underline decoration-line underline-offset-4" href={`https://patents.google.com/?q=${encodeURIComponent(item.code)}`} target="_blank" rel="noreferrer">
+                    {item.code}
+                  </a>
+                  <span>{item.description || "IPC or CPC code printed on the patent."}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Empty>No IPC or CPC classification codes were found.</Empty>
+          )}
         </Section>
         <Section n={sectionNumber("chemicals")} id="chemicals" title="Chemicals" icon={<FlaskConical className="size-4" />}>
           {report.scan.chemicals.length > 0 ? (
@@ -731,14 +771,11 @@ function ReportView({ report }: { report: Report }) {
               ))}
             </ul>
           ) : (
-            <Empty>No named substances, formulas, or CAS numbers were found in the text that was read.</Empty>
+            <Empty>No named substances, polymers, formulas, or CAS numbers were found in the text that was read.</Empty>
           )}
         </Section>
         <Section n={sectionNumber("organisms")} id="organisms" title="Organisms" icon={<Microscope className="size-4" />}>
           <LinkList items={report.scan.organisms} empty="No species, strains, cell lines, or viruses were identified in the text that was read." />
-        </Section>
-        <Section n={sectionNumber("materials")} id="materials" title="Materials" icon={<Layers className="size-4" />}>
-          <LinkList items={report.scan.materials} empty="No composites, resins, alloys, or other construction materials were identified in the text that was read." />
         </Section>
         <Section n={sectionNumber("citations")} id="citations" title="Cited patents" icon={<Link2 className="size-4" />}>
           {record && record.citations.length > 0 ? (

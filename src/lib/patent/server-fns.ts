@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { parseGooglePatent } from "./parse-google";
 import { fetchSerpRecord } from "./serp";
-import { firstSentences, displayClaimNumber, normalizePublicationId, plainClaimBullets, publicationCandidates, samePassage } from "./text";
+import { firstSentences, displayClaimNumber, normalizePublicationId, publicationCandidates, samePassage } from "./text";
 import type { Brief, ClaimNote, LookupInput, OfficialRecord } from "./types";
 
 const pageCache = new Map<string, { at: number; html: string }>();
@@ -227,6 +227,31 @@ type BriefInput = {
 
 const briefCache = new Map<string, Brief>();
 
+function copiesSource(summary: string, source: string): boolean {
+  if (!summary.trim() || !source.trim()) return false;
+  if (samePassage(summary, source)) return true;
+  const flat = summary.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  const base = source.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ");
+  const words = flat.split(" ").filter(Boolean);
+  let hits = 0;
+  let windows = 0;
+  for (let index = 0; index + 10 <= words.length; index += 1) {
+    windows += 1;
+    if (base.includes(words.slice(index, index + 10).join(" "))) hits += 1;
+  }
+  return windows > 0 && hits / windows > 0.34;
+}
+
+function usefulBullet(bullet: string, claim: string): boolean {
+  const clean = bullet.replace(/\s+/g, " ").trim();
+  if (clean.length < 12) return false;
+  if (/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(clean)) return false;
+  if (/^(states what this claim protects|covers a mixture or formulation|covers a way of doing something|covers a device|covers a use of the invention|adds a further requirement)/i.test(clean)) {
+    return false;
+  }
+  return !tooClose(clean, claim);
+}
+
 function tooClose(bullet: string, claim: string): boolean {
   const source = claim.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ");
   const flat = bullet.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
@@ -242,14 +267,13 @@ function tooClose(bullet: string, claim: string): boolean {
 function extractiveBrief(input: BriefInput): Brief {
   const abstractSummary = firstSentences(input.abstract, 5);
   const backgroundSummary = samePassage(input.background, input.abstract) ? "" : firstSentences(input.background, 5);
-  const seed = [input.title ? `${input.title}.` : "", abstractSummary || backgroundSummary].filter(Boolean).join(" ");
   return {
     abstractSummary,
     backgroundSummary,
-    patentSummary: firstSentences(seed, 5) || "The patent text that was read was too short to summarize.",
+    patentSummary: "",
     claimNotes: input.claims.slice(0, 16).map((claim, index) => ({
       number: displayClaimNumber(claim.number || String(index + 1)),
-      bullets: plainClaimBullets(claim.text),
+      bullets: [],
     })),
     source: "extract",
   };
@@ -270,9 +294,9 @@ function acceptNotes(claims: BriefClaim[], parsed: ModelBrief): { notes: ClaimNo
       (parsed.claimNotes ?? []).find((note) => displayClaimNumber(String(note.number ?? "")) === wanted) ??
       parsed.claimNotes?.[index];
     const raw = Array.isArray(match?.bullets) ? match.bullets.map((item) => String(item).trim()).filter(Boolean) : [];
-    const bullets = raw.filter((item) => !tooClose(item, claim.text)).slice(0, 3).map((item) => item.slice(0, 280));
+    const bullets = raw.filter((item) => usefulBullet(item, claim.text)).slice(0, 3).map((item) => item.slice(0, 280));
     if (raw.length > 0 && bullets.length === 0) quoted += 1;
-    return { number: wanted, bullets: bullets.length > 0 ? bullets : plainClaimBullets(claim.text) };
+    return { number: wanted, bullets };
   });
   return { notes, quoted };
 }
@@ -292,7 +316,7 @@ async function askModel(apiKey: string, data: BriefInput, stricter: boolean): Pr
         {
           role: "system",
           content:
-            "You explain patents to a general reader who is not a lawyer. Write in simple English even when the source is not English. Return only JSON with keys abstractSummary (string, at most 5 sentences, or empty if no abstract was provided), backgroundSummary (string, at most 5 sentences, or empty if no background was provided), patentSummary (string, at most 5 sentences on what the whole patent covers), claimNotes (array of {number, bullets}). If the background says (none), backgroundSummary must be an empty string. Never copy the abstract into the background. Each claim gets 1 to 3 bullets that explain what the claim is about in everyday words. Do not quote the claim. Do not reuse any stretch of five or more source words. Replace legal and technical jargon with plain language; a short name in parentheses is allowed once. Do not invent features that are not in the source. Do not give legal advice.",
+            "You explain patents to a general reader who is not a lawyer. Write in simple English even when the source is not English. Return only JSON with keys abstractSummary (string, at most 5 sentences, or empty if no abstract was provided), backgroundSummary (string, at most 5 sentences, or empty if no background was provided), patentSummary (string, at most 5 sentences on what the whole patent covers), claimNotes (array of {number, bullets}). If the background says (none), backgroundSummary must be an empty string. Never copy the abstract into the background or into patentSummary. patentSummary must use new sentences; if a sentence could be found in the abstract, do not write it. Each claim gets 1 to 3 English bullets that explain the point for a non-expert. Do not quote the claim in any language. Do not reuse any stretch of five or more source words. Do not write filler such as 'States what this claim protects', 'Covers a mixture', or 'Adds a further requirement'. If you cannot explain a claim without quoting it, return an empty bullets array for that claim. Do not invent features. Do not give legal advice.",
         },
         {
           role: "user",
@@ -364,10 +388,17 @@ export const explainPatent = createServerFn({ method: "POST" })
         backgroundSummary: samePassage(String(parsed.backgroundSummary ?? ""), data.abstract)
           ? ""
           : String(parsed.backgroundSummary ?? "").replace(/\s+/g, " ").trim().slice(0, 1400),
-        patentSummary: String(parsed.patentSummary || fallback.patentSummary).replace(/\s+/g, " ").trim().slice(0, 1400),
+        patentSummary: copiesSource(String(parsed.patentSummary ?? ""), data.abstract) || /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(String(parsed.patentSummary ?? ""))
+          ? ""
+          : String(parsed.patentSummary ?? "").replace(/\s+/g, " ").trim().slice(0, 1400),
         claimNotes: notes,
         source: parsed.abstractSummary || parsed.backgroundSummary || parsed.patentSummary ? "brief" : "extract",
       };
+      if (!brief.patentSummary) {
+        const again = await askModel(apiKey, data, true).catch(() => null);
+        const rewritten = String(again?.patentSummary ?? "").replace(/\s+/g, " ").trim();
+        if (rewritten && !copiesSource(rewritten, data.abstract)) brief.patentSummary = rewritten.slice(0, 1400);
+      }
       if (!brief.abstractSummary && !brief.backgroundSummary) {
         brief.abstractSummary = fallback.abstractSummary;
         brief.backgroundSummary = fallback.backgroundSummary;
