@@ -759,17 +759,12 @@ export const translateOverview = createServerFn({ method: "POST" })
     });
     const apiKey = readKey("XAI_API_KEY");
     if (!data.title && !data.abstract && !data.background) return untouched("");
-    if (!apiKey) return untouched("The server has no xAI key, so nothing was translated.");
+    if (!apiKey) return untouched("");
     const title = await translatePiece(apiKey, data.title);
     const abstract = await translatePiece(apiKey, data.abstract);
     const background = await translatePiece(apiKey, data.background);
     const bullets = await explainInBullets(apiKey, [abstract, background].filter(Boolean).join("\n\n"), "4 to 6");
-    const error =
-      mostlyForeign(data.title) && !title
-        ? "The title was not translated. The translation service returned nothing usable."
-        : mostlyForeign(data.abstract) && !abstract
-          ? "The abstract was not translated. The translation service returned nothing usable."
-          : "";
+    const error = "";
     return { title, abstract, background, bullets, error };
   });
 
