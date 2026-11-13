@@ -1,4 +1,5 @@
 import { normalizePublicationId } from "./text";
+import type { OfficialRecord } from "./types";
 
 const TEXT_PAGE_LIMIT = 50;
 const SCAN_PAGE_LIMIT = 24;
@@ -166,6 +167,106 @@ function cleanPublicationId(raw: string): string {
   if (!number) return "";
   if (/^T\d?$/.test(kind)) return `${office}${number}`;
   return `${office}${number}${kind}`;
+}
+
+const ROLE_LABELS: [string, "Applicant" | "Inventor" | "Assignee"][] = [
+  ["patent owner", "Assignee"],
+  ["patentinhaber", "Assignee"],
+  ["patenthaver", "Assignee"],
+  ["octrooihouder", "Assignee"],
+  ["proprietor", "Assignee"],
+  ["titulaire", "Assignee"],
+  ["titolare", "Assignee"],
+  ["innehavare", "Assignee"],
+  ["assignee", "Assignee"],
+  ["houder", "Assignee"],
+  ["titular", "Assignee"],
+  ["applicant", "Applicant"],
+  ["anmelder", "Applicant"],
+  ["aanvrager", "Applicant"],
+  ["demandeur", "Applicant"],
+  ["ansøger", "Applicant"],
+  ["ansoeger", "Applicant"],
+  ["ansoger", "Applicant"],
+  ["richiedente", "Applicant"],
+  ["solicitante", "Applicant"],
+  ["sökande", "Applicant"],
+  ["sokande", "Applicant"],
+  ["inventeur", "Inventor"],
+  ["inventore", "Inventor"],
+  ["inventor", "Inventor"],
+  ["opfinder", "Inventor"],
+  ["erfinder", "Inventor"],
+  ["uitvinder", "Inventor"],
+  ["uppfinnare", "Inventor"],
+  ["wynalazca", "Inventor"],
+];
+
+export type FaceParty = { role: "Applicant" | "Inventor" | "Assignee"; name: string; note: string };
+
+export function partiesFromText(text: string): FaceParty[] {
+  const flat = text.slice(0, 4500).replace(/\s+/g, " ");
+  const labels = [...ROLE_LABELS].sort((a, b) => b[0].length - a[0].length);
+  const alt = labels.map(([label]) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const re = new RegExp(
+    `(?:\\((\\d{1,2})\\)\\s*)?\\b(${alt})\\b\\s*([:\\-])\\s*(.+?)(?=\\s*(?:\\(\\d{1,2}\\)\\s*)?\\b(?:${alt})\\b\\s*[:\\-]|\\(\\d{1,2}\\)|$)`,
+    "gi",
+  );
+  const found: FaceParty[] = [];
+  const seen = new Set<string>();
+  for (const match of flat.matchAll(re)) {
+    const label = (match[2] ?? "").toLowerCase();
+    const role = labels.find(([name]) => name === label)?.[1];
+    if (!role) continue;
+    for (const name of namesFromBlob(match[4] ?? "")) {
+      const key = `${role}|${name.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ role, name, note: "" });
+    }
+  }
+  return found;
+}
+
+function namesFromBlob(blob: string): string[] {
+  const cut = (blob.split(/\s+\(\d{1,2}\)\s*/)[0] ?? blob).trim();
+  const pieces = cut.split(/\s+(?=(?:[A-Z]{2,}|[A-Z]'[A-Z]{2,}),\s+[A-Z])/);
+  return pieces.map(cleanPartyName).filter((name) => name.length > 2);
+}
+
+function cleanPartyName(raw: string): string {
+  let name = raw.replace(/\s+/g, " ").replace(/\.{2,}/g, ".").replace(/^[,:;\-\s]+/, "").trim();
+  name = (name.split(/\b(?:Road|Drive|Court|Suite|Street|Avenue|Boulevard|Lane|Floor|Way)\b/i)[0] ?? name).trim();
+  const surname = name.match(/^((?:[A-Z]{2,}|[A-Z]'[A-Z]{2,}),\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+|\s+[A-Z]\.?){0,3})/);
+  if (surname?.[1]) return surname[1].replace(/[,\s]+$/, "");
+  const org = name.match(/^(.+\b(?:Inc\.?|Incorporated|LLC|L\.L\.C\.|Ltd\.?|Limited|GmbH|Corp\.?|Corporation|Company|S\.A\.|AG|N\.V\.|B\.V\.|PLC))\b/i);
+  if (org?.[1]) return org[1].replace(/[,\s]+$/, "");
+  name = name.replace(/,?\s+\d[\d\s-]*$/, "");
+  name = name.replace(/,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2}\b.*$/, "");
+  name = name.replace(/,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s*$/, "");
+  return name.replace(/[,\s]+$/, "").replace(/\s+/g, " ").trim();
+}
+
+export function collectParties(record: OfficialRecord | null, pdfText: string): Record<FaceParty["role"], FaceParty[]> {
+  const buckets: Record<FaceParty["role"], FaceParty[]> = { Applicant: [], Inventor: [], Assignee: [] };
+  const seen = new Set<string>();
+  const add = (role: FaceParty["role"], name: string, note: string) => {
+    const clean = name.replace(/\s+/g, " ").trim();
+    if (clean.length < 2) return;
+    const key = `${role}|${clean.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    buckets[role].push({ role, name: clean, note });
+  };
+  for (const party of partiesFromText(pdfText)) add(party.role, party.name, "");
+  if (record) {
+    for (const name of record.inventors) add("Inventor", name, "");
+    for (const party of record.assignees) {
+      if (/applicant/i.test(party.role)) add("Applicant", party.name, "");
+      else add("Assignee", party.name, party.role === "Assignee" ? "" : party.role);
+    }
+  }
+  return buckets;
 }
 
 export function biblioFromPdf(text: string): { abstract: string; claims: string[] } {

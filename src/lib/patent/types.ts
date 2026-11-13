@@ -72,9 +72,15 @@ export type NamedLink = {
   note: string;
 };
 
+export type ClaimNote = {
+  number: string;
+  bullets: string[];
+};
+
 export type Brief = {
-  purpose: string;
-  claims: string[];
+  abstractSummary: string;
+  patentSummary: string;
+  claimNotes: ClaimNote[];
   translation: string;
   source: "brief" | "extract";
 };

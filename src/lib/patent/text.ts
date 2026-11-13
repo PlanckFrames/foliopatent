@@ -80,6 +80,11 @@ export function wikiUrl(title: string): string {
   return `https://en.wikipedia.org/wiki/${encodeURIComponent(slug)}`;
 }
 
+export function grokUrl(title: string): string {
+  const slug = title.trim().replace(/\s+/g, "_");
+  return `https://grokipedia.com/page/${encodeURIComponent(slug)}`;
+}
+
 export function wikiSearch(query: string): string {
   return `https://en.wikipedia.org/wiki/Special:Search?search=${encodeURIComponent(query)}`;
 }
@@ -89,4 +94,16 @@ export function firstSentences(text: string, count: number): string {
   if (!clean) return "";
   const parts = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
   return parts.slice(0, count).join(" ");
+}
+
+export function claimPoints(text: string): string[] {
+  const body = text.replace(/^\s*\d+\.\s*/, "").replace(/\s+/g, " ").trim();
+  if (!body) return [];
+  const parts = body.split(/;\s+/).map((part) => part.trim()).filter((part) => part.length > 24);
+  const source = parts.length >= 2 ? parts : [body];
+  return source.slice(0, 3).map((part) => {
+    const clean = part.replace(/[,:;]\s*$/, "");
+    if (clean.length <= 150) return clean;
+    return `${clean.slice(0, 147).replace(/\s+\S*$/, "")}…`;
+  });
 }
