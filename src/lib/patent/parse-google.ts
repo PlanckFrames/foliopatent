@@ -190,15 +190,15 @@ function extractClassifications(html: string) {
   const all = [...uniqueCodes.values()];
   const useful = all.filter((item) => item.leaf && !item.code.startsWith("Y") && !item.code.startsWith("B01J2219"));
   const pool = useful.length > 0 ? useful : all.filter((item) => !item.code.startsWith("Y"));
-  const groups = new Map<string, { code: string; description: string }[]>();
+  const groups = new Map<string, { code: string; description: string; scheme: string }[]>();
   for (const item of pool) {
     const key = item.code.split("/")[0] ?? item.code;
     const list = groups.get(key) ?? [];
-    list.push({ code: item.code, description: item.description });
+    list.push({ code: item.code, description: item.description, scheme: "CPC" });
     groups.set(key, list);
   }
   const ordered = [...groups.values()].sort((a, b) => b.length - a.length);
-  const picked: { code: string; description: string }[] = [];
+  const picked: { code: string; description: string; scheme: string }[] = [];
   const seen = new Set<string>();
   for (const [index, items] of ordered.entries()) {
     if (index > 0 && (picked.length >= 4 || items.length < 2)) break;

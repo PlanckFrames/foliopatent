@@ -76,7 +76,7 @@ function pickClasses(items: { code?: string; description?: string; leaf?: boolea
   for (const item of pool) {
     const key = item.code.split("/")[0] ?? item.code;
     const list = groups.get(key) ?? [];
-    list.push({ code: item.code, description: item.description });
+    list.push({ code: item.code, description: item.description, scheme: "CPC" });
     groups.set(key, list);
   }
   const ranked = [...groups.values()].sort((a, b) => b.length - a.length);

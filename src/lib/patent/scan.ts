@@ -1,4 +1,4 @@
-import type { ChemicalHit, NamedLink, Scan } from "./types";
+import type { ChemicalHit, Classification, NamedLink, Scan } from "./types";
 import { escapeRegExp, wikiSearch, wikiUrl } from "./text";
 
 type Chemical = {
@@ -250,15 +250,26 @@ export function plausibleChemicalName(name: string): boolean {
   return true;
 }
 
-export function parseIpcCodes(text: string): { code: string; description: string }[] {
-  const found: { code: string; description: string }[] = [];
+export function parseIpcCodes(text: string): { code: string; description: string; scheme: string }[] {
+  const found: { code: string; description: string; scheme: string }[] = [];
   const seen = new Set<string>();
-  for (const match of text.matchAll(/\b([A-HY]\d{2}[A-Z])(?:\s*(\d{1,4})\s*\/\s*(\d{2,6}))?\b/g)) {
-    const main = (match[1] ?? "").toUpperCase();
-    const code = match[2] && match[3] ? `${main} ${match[2]}/${match[3]}` : main;
-    if (seen.has(code)) continue;
-    seen.add(code);
-    found.push({ code, description: "" });
+  let scheme = "";
+  const pattern =
+    /International Patent Classification|Cooperative Patent Classification|Int\.?\s*Cl\.?|U\.S\.?\s*Cl\.?|Locarno Classification|\b([A-HY]\d{2}[A-Z])\s*(\d{1,4})\s*\/\s*(\d{2,6})\b/g;
+  for (const match of text.matchAll(pattern)) {
+    const heading = match[0];
+    if (!match[1]) {
+      if (/Cooperative|\bCPC\b/i.test(heading)) scheme = "CPC";
+      else if (/U\.S/i.test(heading)) scheme = "USPC";
+      else if (/Locarno/i.test(heading)) scheme = "Locarno";
+      else scheme = "IPC";
+      continue;
+    }
+    const code = `${(match[1] ?? "").toUpperCase()} ${match[2]}/${match[3]}`;
+    const key = code.replace(/\s+/g, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    found.push({ code, description: "", scheme });
   }
   return found;
 }
@@ -440,19 +451,24 @@ export function scanText(text: string, extras?: { classifications?: { code: stri
 }
 
 function mergeClasses(
-  listed: { code: string; description: string }[],
-  parsed: { code: string; description: string }[],
-): { code: string; description: string }[] {
-  const found: { code: string; description: string }[] = [];
-  const seen = new Set<string>();
+  listed: { code: string; description: string; scheme?: string }[],
+  parsed: { code: string; description: string; scheme?: string }[],
+): Classification[] {
+  const found = new Map<string, Classification>();
   for (const item of [...listed, ...parsed]) {
-    const code = item.code.replace(/\s+/g, " ").trim().toUpperCase();
-    if (!code || seen.has(code)) continue;
-    seen.add(code);
-    found.push({ code, description: item.description.replace(/\s+/g, " ").trim() });
+    const key = item.code.toUpperCase().replace(/\s+/g, "");
+    if (!/^[A-HY]\d{2}[A-Z]\d+\/\d+$/.test(key)) continue;
+    const current = found.get(key);
+    const scheme = [current?.scheme, item.scheme].filter(Boolean).join(", ");
+    const schemes = [...new Set(scheme.split(",").map((part) => part.trim()).filter(Boolean))];
+    const description = item.description.replace(/\s+/g, " ").trim();
+    found.set(key, {
+      code: key,
+      description: description.length > (current?.description.length ?? 0) ? description : (current?.description ?? ""),
+      scheme: schemes.join(", "),
+    });
   }
-  const detailed = new Set(found.filter((item) => item.code.includes(" ")).map((item) => item.code.split(" ")[0]));
-  return found.filter((item) => item.code.includes(" ") || !detailed.has(item.code)).slice(0, 40);
+  return [...found.values()].slice(0, 40);
 }
 
 type LatinHint = { code: string; tess: string; label: string; pattern: string };

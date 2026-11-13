@@ -14,7 +14,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { explainPatent, lookupPatent, readPatentPages, translateFrontMatter } from "@/lib/patent/server-fns";
+import { describeClasses, lookupPatent, readPatentPages, translateClaims, translateOverview } from "@/lib/patent/server-fns";
 import { biblioFromPdf, collectNumbers, collectParties, extractPdfText, findPublicationId, inventorColumns, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
 import { absorbFindings, detectLanguage, scanText, type PageFinding } from "@/lib/patent/scan";
 import { displayClaimNumber, filingPlace, grokUrl, patentUrl, readingChunksFromExcerpt, samePassage, selectReadingPages, wikiSearch, type ReadingPage } from "@/lib/patent/text";
@@ -34,7 +34,7 @@ const SECTIONS = [
   { id: "purpose", title: "Purpose" },
   { id: "claims", title: "Claims" },
   { id: "technologies", title: "Technologies" },
-  { id: "classes", title: "Classifications" },
+  { id: "classes", title: "Patent classifications" },
   { id: "chemicals", title: "Chemicals" },
   { id: "organisms", title: "Organisms" },
   { id: "citations", title: "Cited patents" },
@@ -70,7 +70,7 @@ function fieldNeedsTranslation(text: string): boolean {
   return detectLanguage(sample).code !== "en";
 }
 
-type ShownClaim = { number: string; text: string; original: string; independent: boolean };
+type ShownClaim = { number: string; text: string; original: string; independent: boolean; notes: string[] };
 
 type Report = {
   record: OfficialRecord | null;
@@ -84,6 +84,9 @@ type Report = {
   originalTitle: string;
   displayAbstract: string;
   originalAbstract: string;
+  displayBackground: string;
+  originalBackground: string;
+  plainPoints: string[];
   frontTranslated: boolean;
   languageLabel: string;
   translatedPages: { page: number; english: string }[];
@@ -229,52 +232,56 @@ export function FolioApp() {
 
       let displayTitle = sourceTitle;
       let displayAbstract = abstract;
-      let writtenClaims: ShownClaim[] = sourceClaims.map((claim) => ({ ...claim, original: claim.text }));
+      let displayBackground = background;
+      let plainPoints: string[] = [];
+      let writtenClaims: ShownClaim[] = sourceClaims.map((claim) => ({ ...claim, original: claim.text, text: "", notes: [] }));
       let frontTranslated = false;
-      const translateTitle = fieldNeedsTranslation(sourceTitle);
-      const translateAbstract = fieldNeedsTranslation(abstract);
-      const foreignClaims = sourceClaims.filter((claim) => fieldNeedsTranslation(claim.text));
       const frontLanguage = detectLanguage(
-        foreignClaims.map((claim) => claim.text).join("\n").slice(0, 2500) || (translateAbstract ? abstract : sourceTitle),
+        sourceClaims.map((claim) => claim.text).join("\n").slice(0, 2500) || [sourceTitle, abstract, background].join("\n"),
       );
-      if (translateTitle || translateAbstract || foreignClaims.length > 0) {
-        patchTab(tabId, { status: "Translating the title, abstract, and every claim…" });
-        const groups: typeof sourceClaims[] = [];
-        for (let index = 0; index < foreignClaims.length; index += 6) groups.push(foreignClaims.slice(index, index + 6));
-        if (groups.length === 0) groups.push([]);
-        const language = frontLanguage.code === "en" ? "zh" : frontLanguage.code;
-        for (let index = 0; index < groups.length; index += 1) {
-          if (!liveTabs.current.has(tabId)) return;
-          const group = groups[index] ?? [];
-          if (groups.length > 1) {
-            const first = group[0]?.number ?? "";
-            const last = group[group.length - 1]?.number ?? "";
-            patchTab(tabId, { status: `Translating claims ${first}–${last}…` });
-          }
-          const part = await translateFrontMatter({
-            data: {
-              language,
-              languageLabel: frontLanguage.label === "English" ? "the source language" : frontLanguage.label,
-              title: index === 0 && translateTitle ? sourceTitle : "",
-              abstract: index === 0 && translateAbstract ? abstract : "",
-              claims: group.map((claim) => ({ number: claim.number, text: claim.text })),
-            },
-          });
-          if (!liveTabs.current.has(tabId)) return;
-          if (index === 0) {
-            if (translateTitle && part.title && !fieldNeedsTranslation(part.title)) displayTitle = part.title;
-            if (translateAbstract && part.abstract && !fieldNeedsTranslation(part.abstract)) displayAbstract = part.abstract;
-          }
-          if (part.translated) {
-            frontTranslated = true;
-            writtenClaims = writtenClaims.map((claim) => {
-              const next = part.claims.find((item) => displayClaimNumber(item.number) === claim.number);
-              if (!next || next.text === claim.text || fieldNeedsTranslation(next.text)) return claim;
-              return { ...claim, text: next.text, original: claim.original || claim.text };
-            });
-          }
-        }
+      if (sourceTitle || abstract || background) {
+        patchTab(tabId, { status: "Translating the abstract and background…" });
+        const overview = await translateOverview({
+          data: { title: sourceTitle, abstract, background, languageLabel: frontLanguage.label },
+        });
+        if (!liveTabs.current.has(tabId)) return;
+        if (overview.title) displayTitle = overview.title;
+        if (overview.abstract) displayAbstract = overview.abstract;
+        if (overview.background) displayBackground = overview.background;
+        plainPoints = overview.bullets;
+        frontTranslated = displayTitle !== sourceTitle || displayAbstract !== abstract || displayBackground !== background || plainPoints.length > 0;
       }
+      for (let index = 0; index < sourceClaims.length; index += 2) {
+        if (!liveTabs.current.has(tabId)) return;
+        const group = sourceClaims.slice(index, index + 2);
+        const last = group[group.length - 1]?.number ?? "";
+        patchTab(tabId, { status: group.length === 1 ? `Translating claim ${group[0]?.number}…` : `Translating claims ${group[0]?.number}–${last}…` });
+        const part = await translateClaims({
+          data: {
+            languageLabel: frontLanguage.label,
+            claims: group.map((claim) => ({ number: claim.number, text: claim.text })),
+          },
+        });
+        if (!liveTabs.current.has(tabId)) return;
+        writtenClaims = writtenClaims.map((claim) => {
+          const next = part.claims.find((item) => displayClaimNumber(item.number) === claim.number);
+          if (!next?.english) return claim;
+          frontTranslated = true;
+          return { ...claim, text: next.english, notes: next.bullets };
+        });
+      }
+      const missing = writtenClaims.filter((claim) => claim.original && !claim.text && fieldNeedsTranslation(claim.original));
+      for (const claim of missing) {
+        if (!liveTabs.current.has(tabId)) return;
+        patchTab(tabId, { status: `Translating claim ${claim.number} again…` });
+        const part = await translateClaims({
+          data: { languageLabel: frontLanguage.label, claims: [{ number: claim.number, text: claim.original }] },
+        });
+        const next = part.claims[0];
+        if (!next?.english) continue;
+        writtenClaims = writtenClaims.map((item) => (item.number === claim.number ? { ...item, text: next.english, notes: next.bullets } : item));
+      }
+      writtenClaims = writtenClaims.map((claim) => (claim.text || fieldNeedsTranslation(claim.original) ? claim : { ...claim, text: claim.original }));
 
       const findings: PageFinding = { chemicals: [], organisms: [], materials: [], technologies: [] };
       const translatedPages: { page: number; english: string }[] = [];
@@ -327,6 +334,10 @@ export function FolioApp() {
         keywords: record?.keywords,
       });
       const scan = absorbFindings(glossary, findings);
+      if (scan.classes.length > 0) {
+        const described = await describeClasses({ data: { items: scan.classes } }).catch(() => null);
+        if (described && described.length > 0) scan.classes = described;
+      }
       let pageNote = pageReadingNote({
         pages: reading.length,
         translated: translatedPages.length,
@@ -337,27 +348,14 @@ export function FolioApp() {
         fromRecord,
         languageLabel: spoken.label,
       });
-      if (frontLanguage.code !== "en" && !frontTranslated) {
-        pageNote = [pageNote, "The title, abstract, and claims could not be translated, so the original wording is shown."]
-          .filter(Boolean)
-          .join(" ");
-      }
 
-      patchTab(tabId, { status: "Writing a plain-language brief…" });
-      const briefClaims = [...writtenClaims.filter((claim) => claim.independent), ...writtenClaims.filter((claim) => !claim.independent)].slice(0, 16);
-      const brief = await explainPatent({
-        data: {
-          title: displayTitle,
-          abstract: displayAbstract,
-          background,
-          claims: briefClaims.map((claim) => ({
-            number: claim.number,
-            text: claim.text,
-          })),
-          context: (englishBody || background || record?.excerpt || pdfText).slice(0, 1800),
-          language: writtenClaims.some((claim) => fieldNeedsTranslation(claim.text)) ? frontLanguage.code : "en",
-        },
-      });
+      const brief: Brief = {
+        abstractSummary: "",
+        backgroundSummary: "",
+        patentSummary: "",
+        claimNotes: writtenClaims.map((claim) => ({ number: claim.number, bullets: claim.notes })),
+        source: plainPoints.length > 0 ? "brief" : "extract",
+      };
       if (!liveTabs.current.has(tabId)) return;
 
       patchTab(tabId, {
@@ -376,6 +374,9 @@ export function FolioApp() {
           originalTitle: sourceTitle,
           displayAbstract,
           originalAbstract: abstract,
+          displayBackground,
+          originalBackground: background,
+          plainPoints,
           frontTranslated,
           languageLabel: frontLanguage.label,
           translatedPages,
@@ -578,8 +579,6 @@ function pageReadingNote(input: {
 
 function ReportView({ report }: { report: Report }) {
   const record = report.record;
-  const abstractText = report.displayAbstract.trim();
-  const backgroundText = samePassage(abstractText, report.brief.backgroundSummary) ? "" : report.brief.backgroundSummary.trim();
   return (
     <article className="mt-10 lg:grid lg:grid-cols-[12.5rem_minmax(0,1fr)] lg:items-start lg:gap-8">
       <nav
@@ -653,47 +652,25 @@ function ReportView({ report }: { report: Report }) {
           <PartyList items={report.parties.Assignee} empty="No assignee or patent holder was identified." />
         </Section>
         <Section n={sectionNumber("purpose")} id="purpose" title="Purpose" icon={<ScrollText className="size-4" />}>
-          <p className="text-sm font-semibold text-copper">Abstract</p>
-          {abstractText ? (
-            <p className="mt-2 text-lg leading-relaxed">{abstractText}</p>
-          ) : backgroundText ? (
-            <p className="mt-2 leading-relaxed text-muted">There is no abstract. The patent supplies a background section instead.</p>
-          ) : (
-            <p className="mt-2 leading-relaxed text-muted">No abstract was available.</p>
-          )}
-          {report.frontTranslated && report.originalAbstract && report.originalAbstract !== report.displayAbstract ? (
-            <details className="mt-3">
-              <summary className="cursor-pointer text-sm text-muted">Original abstract</summary>
-              <p className="mt-2 text-sm leading-relaxed text-muted">{report.originalAbstract}</p>
-            </details>
-          ) : null}
-          <p className="mt-5 text-sm font-semibold text-copper">Background</p>
-          {backgroundText ? (
-            <p className="mt-2 leading-relaxed">{backgroundText}</p>
-          ) : abstractText ? (
-            <p className="mt-2 leading-relaxed text-muted">There is no background section other than the abstract.</p>
-          ) : (
-            <p className="mt-2 leading-relaxed text-muted">No background section was found.</p>
-          )}
+          <FacingText label="Abstract" original={report.originalAbstract} english={report.displayAbstract} />
+          <div className="mt-5">
+            <FacingText label="Background" original={report.originalBackground} english={report.displayBackground} />
+          </div>
           <p className="mt-5 text-sm font-semibold text-copper">In plain language</p>
-          {report.brief.patentSummary ? (
-            <p className="mt-2 text-lg leading-relaxed">{report.brief.patentSummary}</p>
-          ) : (
-            <p className="mt-2 leading-relaxed text-muted">A plain-language summary of the whole patent was not written. The abstract above is the source text, not a summary.</p>
-          )}
+          <ul className="mt-2 grid gap-2">
+            {report.plainPoints.map((point) => (
+              <li key={point} className="rounded-xl bg-wash px-3 py-2 leading-relaxed">
+                {point}
+              </li>
+            ))}
+          </ul>
         </Section>
         <Section n={sectionNumber("claims")} id="claims" title="Claims" icon={<ScrollText className="size-4" />}>
           {report.writtenClaims.length > 0 ? (
             <ol className="grid gap-5">
               {report.writtenClaims.map((claim) => {
-                const notes =
-                  report.brief.claimNotes.find((note) => displayClaimNumber(note.number) === displayClaimNumber(claim.number))?.bullets ??
-                  [];
-                const bullets = notes
-                  .filter((note) => note.trim().length > 11 && !USELESS_SUMMARY.test(note) && !fieldNeedsTranslation(note))
-                  .slice(0, 3);
+                const bullets = claim.notes.filter((note) => note.trim().length > 11 && !USELESS_SUMMARY.test(note)).slice(0, 3);
                 const original = claim.original || claim.text;
-                const translated = original !== claim.text && !fieldNeedsTranslation(claim.text);
                 return (
                   <li key={`${claim.number}-${original.slice(0, 24)}`} className="border-b border-line pb-4">
                     <p className="font-mono text-sm text-copper">{displayClaimNumber(claim.number)}</p>
@@ -704,7 +681,7 @@ function ReportView({ report }: { report: Report }) {
                       </div>
                       <div>
                         <p className="text-sm font-semibold text-copper">English</p>
-                        <p className="mt-1 leading-relaxed">{translated ? claim.text : fieldNeedsTranslation(original) ? "This claim was not translated." : "Already in English."}</p>
+                        <p className="mt-1 leading-relaxed">{claim.text}</p>
                       </div>
                       <div>
                         <p className="text-sm font-semibold text-copper">Summary</p>
@@ -716,9 +693,7 @@ function ReportView({ report }: { report: Report }) {
                               </li>
                             ))}
                           </ul>
-                        ) : (
-                          <p className="mt-1 text-sm text-muted">No separate summary was written for this claim.</p>
-                        )}
+                        ) : null}
                       </div>
                     </div>
                   </li>
@@ -732,18 +707,24 @@ function ReportView({ report }: { report: Report }) {
         <Section n={sectionNumber("technologies")} id="technologies" title="Technologies" icon={<Search className="size-4" />}>
           <TechList items={report.scan.technologies} empty="No named methods or instruments were found in the text that was read." />
         </Section>
-        <Section n={sectionNumber("classes")} id="classes" title="Classifications" icon={<Hash className="size-4" />}>
+        <Section n={sectionNumber("classes")} id="classes" title="Patent classifications" icon={<Hash className="size-4" />}>
           {report.scan.classes.length > 0 ? (
-            <ul className="grid gap-2">
+            <div className="grid gap-2">
+              <div className="hidden gap-3 border-b border-line pb-2 text-sm font-semibold text-copper sm:grid sm:grid-cols-[8.5rem_6.5rem_minmax(0,1fr)]">
+                <span>Code</span>
+                <span>Type</span>
+                <span>Meaning</span>
+              </div>
               {report.scan.classes.map((item) => (
-                <li key={item.code} className="grid gap-1 border-b border-line py-2 sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-3">
+                <div key={`${item.scheme}-${item.code}`} className="grid gap-1 border-b border-line py-2 sm:grid-cols-[8.5rem_6.5rem_minmax(0,1fr)] sm:gap-3">
                   <a className="font-mono text-sm underline decoration-line underline-offset-4" href={`https://patents.google.com/?q=${encodeURIComponent(item.code)}`} target="_blank" rel="noreferrer">
                     {item.code}
                   </a>
-                  <span>{item.description || "IPC or CPC code printed on the patent."}</span>
-                </li>
+                  <span className="text-sm">{item.scheme}</span>
+                  <span>{item.description}</span>
+                </div>
               ))}
-            </ul>
+            </div>
           ) : (
             <Empty>No IPC or CPC classification codes were found.</Empty>
           )}
@@ -878,6 +859,25 @@ function ReportView({ report }: { report: Report }) {
       </div>
       </div>
     </article>
+  );
+}
+
+function FacingText({ label, original, english }: { label: string; original: string; english: string }) {
+  if (!original.trim() && !english.trim()) return null;
+  return (
+    <div>
+      <p className="text-sm font-semibold text-copper">{label}</p>
+      <div className="mt-2 grid gap-4 lg:grid-cols-2">
+        <div>
+          <p className="text-sm font-semibold text-muted">Original</p>
+          <p className="mt-1 leading-relaxed">{original}</p>
+        </div>
+        <div>
+          <p className="text-sm font-semibold text-muted">English</p>
+          <p className="mt-1 leading-relaxed">{english}</p>
+        </div>
+      </div>
+    </div>
   );
 }
 

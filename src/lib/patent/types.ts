@@ -35,6 +35,7 @@ export type RelatedCase = {
 export type Classification = {
   code: string;
   description: string;
+  scheme?: string;
 };
 
 export type PatentNumber = {
