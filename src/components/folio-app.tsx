@@ -91,16 +91,19 @@ export function FolioApp() {
       if (options.file) {
         if (options.file.size > 30 * 1024 * 1024) throw new Error("That PDF is over 30 MB. Try a smaller file.");
         setStatus("Reading the PDF in this browser…");
-        const extracted = await extractPdfText(options.file, (done, total) => {
+        const extracted = await extractPdfText(options.file, (message) => {
           if (token !== runId.current) return;
-          setStatus(`Reading page ${done} of ${Math.min(total, 50)}…`);
+          setStatus(message);
         });
         if (token !== runId.current) return;
         pdfText = extracted.text;
         if (!pdfText.trim()) {
-          throw new Error("This PDF has no text layer. A scan without selectable text cannot be read here.");
+          throw new Error("This PDF could not be read. Type the publication number, or upload a clearer file.");
         }
-        pdfNote = extracted.truncated ? "Read the first 50 pages of the PDF." : "Read the uploaded PDF in the browser.";
+        const where = extracted.scanned ? "scan" : "PDF";
+        pdfNote = extracted.truncated
+          ? `Read the first ${extracted.scanned ? 24 : 50} pages of the ${where} in this browser. The file was not uploaded.`
+          : `Read the uploaded ${where} in this browser. The file was not uploaded.`;
         id = id || findPublicationId(pdfText);
       }
 
@@ -255,7 +258,7 @@ export function FolioApp() {
               <FileUp className="size-5 shrink-0" />
               <span>
                 <span className="block font-semibold">Upload the PDF instead</span>
-                <span className="block text-sm text-muted">The file stays in the browser. FolioPatent still looks up the number printed on it.</span>
+                <span className="block text-sm text-muted">The file stays in this browser, including scans. FolioPatent reads the pages here, then looks up the number printed on them.</span>
               </span>
             </button>
             <input
@@ -285,7 +288,7 @@ export function FolioApp() {
         {report ? <ReportView report={report} translateTo={translateTo} translating={translating} onLanguage={setTranslateTo} onTranslate={() => void translateAbstract()} /> : null}
 
         <footer className="mt-16 border-t border-line pt-6 text-sm leading-relaxed text-muted">
-          PDFs stay on this device. Lookup uses the configured patent services, then the public patent page. The
+          PDFs and scans stay on this device. Lookup uses the configured patent services, then the public patent page. The
           plain-language brief sends only the title, abstract, and a few claims.
         </footer>
       </main>
