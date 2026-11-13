@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { parseGooglePatent } from "./parse-google";
 import { fetchSerpRecord } from "./serp";
-import { firstSentences, claimPoints, normalizePublicationId, publicationCandidates } from "./text";
+import { firstSentences, displayClaimNumber, normalizePublicationId, publicationCandidates } from "./text";
 import type { Brief, ClaimNote, LookupInput, OfficialRecord } from "./types";
 
 const pageCache = new Map<string, { at: number; html: string }>();
@@ -65,6 +65,7 @@ async function enrichUspto(record: OfficialRecord, apiKey: string) {
         grantDate?: string;
         earliestPublicationDate?: string;
         applicationStatusDescriptionText?: string;
+        applicationNumberText?: string;
         inventorBag?: { inventorNameText?: string; firstName?: string; lastName?: string }[];
         applicantBag?: { applicantNameText?: string }[];
       };
@@ -99,6 +100,9 @@ async function enrichUspto(record: OfficialRecord, apiKey: string) {
   putDate("Filing", meta.filingDate);
   putDate("Publication", meta.earliestPublicationDate);
   putDate("Grant", meta.grantDate);
+  if (meta.applicationNumberText && !(record.numbers ?? []).some((item) => item.label === "Application")) {
+    record.numbers = [...(record.numbers ?? []), { label: "Application", value: meta.applicationNumberText }];
+  }
   const wrapper = body.patentFileWrapperDataBag?.[0];
   for (const parent of wrapper?.parentContinuityBag ?? []) {
     if (!parent.parentApplicationNumberText) continue;
@@ -215,109 +219,170 @@ type BriefClaim = { number: string; text: string };
 type BriefInput = {
   title: string;
   abstract: string;
+  background: string;
   claims: BriefClaim[];
   context: string;
   language: string;
-  targetLanguage: string;
 };
 
 const briefCache = new Map<string, Brief>();
 
-function notesFor(claims: BriefClaim[]): ClaimNote[] {
-  return claims.slice(0, 8).map((claim, index) => ({
-    number: claim.number || String(index + 1),
-    bullets: claimPoints(claim.text),
-  }));
+const STOP_WORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "from", "into", "over", "under", "than", "then", "such", "also", "only",
+  "each", "any", "are", "was", "were", "been", "being", "have", "has", "had", "not", "but", "its", "their", "said",
+  "wherein", "comprising", "according", "claim", "claims", "method", "use", "using", "which", "wherein",
+]);
+
+function contentWords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !STOP_WORDS.has(word));
+}
+
+function tooClose(bullet: string, claim: string): boolean {
+  const source = claim.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ");
+  const flat = bullet.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  if (flat.length > 40 && source.includes(flat)) return true;
+  const words = contentWords(bullet);
+  if (words.length < 4) return false;
+  const claimSet = new Set(contentWords(claim));
+  const shared = words.filter((word) => claimSet.has(word)).length;
+  return shared / words.length > 0.62;
 }
 
 function extractiveBrief(input: BriefInput): Brief {
-  const abstractSummary =
-    firstSentences(input.abstract, 5) || "The document did not include an abstract that could be summarized.";
-  const patentSummary =
-    firstSentences([input.title ? `${input.title}.` : "", input.abstract].filter(Boolean).join(" "), 5) || abstractSummary;
+  const abstractSummary = firstSentences(input.abstract, 5);
+  const backgroundSummary = firstSentences(input.background, 5);
+  const seed = [input.title ? `${input.title}.` : "", abstractSummary || backgroundSummary].filter(Boolean).join(" ");
   return {
     abstractSummary,
-    patentSummary,
-    claimNotes: notesFor(input.claims),
-    translation: "",
+    backgroundSummary,
+    patentSummary: firstSentences(seed, 5) || "The patent text that was read was too short to summarize.",
+    claimNotes: input.claims.slice(0, 8).map((claim, index) => ({
+      number: displayClaimNumber(claim.number || String(index + 1)),
+      bullets: [],
+    })),
     source: "extract",
   };
+}
+
+type ModelBrief = {
+  abstractSummary?: string;
+  backgroundSummary?: string;
+  patentSummary?: string;
+  claimNotes?: { number?: string; bullets?: unknown }[];
+};
+
+function acceptNotes(claims: BriefClaim[], parsed: ModelBrief): { notes: ClaimNote[]; quoted: number } {
+  let quoted = 0;
+  const notes = claims.map((claim, index) => {
+    const wanted = displayClaimNumber(claim.number || String(index + 1));
+    const match =
+      (parsed.claimNotes ?? []).find((note) => displayClaimNumber(String(note.number ?? "")) === wanted) ??
+      parsed.claimNotes?.[index];
+    const raw = Array.isArray(match?.bullets) ? match.bullets.map((item) => String(item).trim()).filter(Boolean) : [];
+    const bullets = raw.filter((item) => !tooClose(item, claim.text)).slice(0, 3).map((item) => item.slice(0, 280));
+    if (raw.length > 0 && bullets.length === 0) quoted += 1;
+    return { number: wanted, bullets };
+  });
+  return { notes, quoted };
+}
+
+async function askModel(apiKey: string, data: BriefInput, stricter: boolean): Promise<ModelBrief | null> {
+  const response = await fetch("https://api.x.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "grok-4.5",
+      temperature: stricter ? 0.4 : 0.2,
+      max_tokens: 1800,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You explain patents to a general reader who is not a lawyer. Write in simple English even when the source is not English. Return only JSON with keys abstractSummary (string, at most 5 sentences, or empty if no abstract was provided), backgroundSummary (string, at most 5 sentences, or empty if no background was provided), patentSummary (string, at most 5 sentences on what the whole patent covers), claimNotes (array of {number, bullets}). Each claim gets 1 to 3 bullets that explain what the claim is about in everyday words. Do not quote the claim. Do not reuse any stretch of five or more source words. Replace legal and technical jargon with plain language; a short name in parentheses is allowed once. Do not invent features that are not in the source. Do not give legal advice.",
+        },
+        {
+          role: "user",
+          content: `${stricter ? "The previous bullets copied the claim. Rewrite every bullet so a high-school reader understands the point without seeing the claim.\n" : ""}Source language: ${data.language || "unknown"}
+Title: ${data.title}
+
+Abstract:
+${data.abstract || "(none)"}
+
+Background:
+${data.background || "(none)"}
+
+Description excerpt:
+${data.context || "(none)"}
+
+Claims:
+${data.claims.map((claim) => `${displayClaimNumber(claim.number)}. ${claim.text}`).join("\n\n")}`,
+        },
+      ],
+    }),
+    signal: AbortSignal.timeout(40_000),
+  });
+  if (!response.ok) return null;
+  const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+  const raw = body.choices?.[0]?.message?.content ?? "";
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  return JSON.parse(raw.slice(start, end + 1)) as ModelBrief;
 }
 
 export const explainPatent = createServerFn({ method: "POST" })
   .validator((input: BriefInput) => ({
     title: (input.title ?? "").slice(0, 300),
     abstract: (input.abstract ?? "").slice(0, 3500),
+    background: (input.background ?? "").slice(0, 3500),
     claims: (input.claims ?? []).slice(0, 8).map((claim) => ({
       number: String(claim.number ?? "").slice(0, 8),
       text: String(claim.text ?? "").slice(0, 900),
     })),
-    context: (input.context ?? "").slice(0, 2500),
+    context: (input.context ?? "").slice(0, 1800),
     language: (input.language ?? "en").slice(0, 12),
-    targetLanguage: (input.targetLanguage ?? "").slice(0, 24),
   }))
   .handler(async ({ data }): Promise<Brief> => {
     const fallback = extractiveBrief(data);
     const apiKey = process.env.XAI_API_KEY;
-    if (!apiKey || (!data.abstract && data.claims.length === 0)) return fallback;
-    const cacheKey = `${data.targetLanguage}|${data.title}|${data.abstract.slice(0, 160)}|${data.claims.map((claim) => claim.number).join(",")}`;
+    if (!apiKey || (!data.abstract && !data.background && data.claims.length === 0)) return fallback;
+    const cacheKey = `${data.title}|${data.abstract.slice(0, 120)}|${data.background.slice(0, 120)}|${data.claims.map((claim) => claim.number).join(",")}`;
     const cached = briefCache.get(cacheKey);
     if (cached) return cached;
-    const target = data.targetLanguage
-      ? `Also translate the abstract into ${data.targetLanguage}. Put that translation in translation.`
-      : data.language !== "en"
-        ? "The source may not be English. Include an English translation of the abstract in translation."
-        : "If the source is already English, leave translation empty.";
     try {
-      const response = await fetch("https://api.x.ai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: "grok-4.5",
-          temperature: 0.2,
-          max_tokens: 1600,
-          messages: [
-            {
-              role: "system",
-              content:
-                "You explain patents to a general reader who is not a lawyer. Return only JSON with keys abstractSummary (string, at most 5 sentences), patentSummary (string, at most 5 sentences on what the whole patent covers), claimNotes (array of {number, bullets} where bullets has at most 3 short plain-language points per claim), translation (string). Do not quote the claims verbatim. Do not invent features that are not in the source. Do not give legal advice.",
-            },
-            {
-              role: "user",
-              content: `${target}\nTitle: ${data.title}\n\nAbstract:\n${data.abstract || "(none)"}\n\nDescription excerpt:\n${data.context || "(none)"}\n\nClaims:\n${data.claims.map((claim) => `${claim.number}. ${claim.text}`).join("\n\n")}`,
-            },
-          ],
-        }),
-        signal: AbortSignal.timeout(40_000),
-      });
-      if (!response.ok) return fallback;
-      const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
-      const raw = body.choices?.[0]?.message?.content ?? "";
-      const jsonText = raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1);
-      const parsed = JSON.parse(jsonText) as {
-        abstractSummary?: string;
-        patentSummary?: string;
-        claimNotes?: { number?: string; bullets?: unknown }[];
-        translation?: string;
-      };
-      const claimNotes = data.claims.map((claim, index) => {
-        const match = (parsed.claimNotes ?? []).find((note) => String(note.number ?? "") === claim.number) ?? parsed.claimNotes?.[index];
-        const bullets = Array.isArray(match?.bullets) ? match.bullets.map((item) => String(item).trim()).filter(Boolean).slice(0, 3) : [];
-        return {
-          number: claim.number || String(index + 1),
-          bullets: (bullets.length > 0 ? bullets : claimPoints(claim.text)).map((item) => item.slice(0, 220)),
-        };
-      });
+      const parsed = await askModel(apiKey, data, false);
+      if (!parsed) return fallback;
+      let { notes, quoted } = acceptNotes(data.claims, parsed);
+      const missing = notes.filter((note) => note.bullets.length === 0).length;
+      if (data.claims.length > 0 && (quoted > 0 || missing * 2 >= data.claims.length)) {
+        const again = await askModel(apiKey, data, true).catch(() => null);
+        if (again) {
+          const retried = acceptNotes(data.claims, again);
+          notes = notes.map((note, index) => {
+            const next = retried.notes[index];
+            if (note.bullets.length === 0 && next && next.bullets.length > 0) return next;
+            return note;
+          });
+        }
+      }
       const brief: Brief = {
-        abstractSummary: String(parsed.abstractSummary || fallback.abstractSummary).slice(0, 1400),
-        patentSummary: String(parsed.patentSummary || fallback.patentSummary).slice(0, 1400),
-        claimNotes,
-        translation: String(parsed.translation ?? "").slice(0, 2000),
-        source: parsed.abstractSummary ? "brief" : "extract",
+        abstractSummary: String(parsed.abstractSummary ?? "").replace(/\s+/g, " ").trim().slice(0, 1400),
+        backgroundSummary: String(parsed.backgroundSummary ?? "").replace(/\s+/g, " ").trim().slice(0, 1400),
+        patentSummary: String(parsed.patentSummary || fallback.patentSummary).replace(/\s+/g, " ").trim().slice(0, 1400),
+        claimNotes: notes,
+        source: parsed.abstractSummary || parsed.backgroundSummary || parsed.patentSummary ? "brief" : "extract",
       };
+      if (!brief.abstractSummary && !brief.backgroundSummary) {
+        brief.abstractSummary = fallback.abstractSummary;
+        brief.backgroundSummary = fallback.backgroundSummary;
+      }
       if (briefCache.size > 24) briefCache.clear();
       briefCache.set(cacheKey, brief);
       return brief;

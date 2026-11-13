@@ -1,5 +1,6 @@
-import { normalizePublicationId } from "./text";
-import type { OfficialRecord } from "./types";
+import { normalizePublicationId, displayClaimNumber } from "./text";
+import { detectScanLanguage } from "./scan";
+import type { OfficialRecord, PatentNumber } from "./types";
 
 const TEXT_PAGE_LIMIT = 50;
 const SCAN_PAGE_LIMIT = 24;
@@ -77,42 +78,141 @@ function itemsToLine(items: TextItem[]): string {
 }
 
 async function readScan(doc: PdfDoc, pageCount: number, onProgress?: (message: string) => void): Promise<string[]> {
-  onProgress?.("Preparing the on-device reader…");
-  let worker: Awaited<ReturnType<typeof import("tesseract.js").createWorker>>;
+  onProgress?.("Checking which language the scan is in…");
+  const first = await renderPage(doc, 1);
+  let pack = "eng";
   try {
     const { createWorker } = await import("tesseract.js");
-    worker = await createWorker("eng", 1, {
-      logger(message) {
-        if ((message.status ?? "").startsWith("loading")) onProgress?.("Preparing the on-device reader…");
-      },
-    });
+    const osd = await createWorker("osd", 1, { legacyCore: true, legacyLang: true });
+    try {
+      const found = await osd.detect(first);
+      pack = langsForScript(found.data?.script ?? null);
+    } finally {
+      await osd.terminate().catch(() => undefined);
+    }
   } catch {
-    throw new Error("The on-device reader could not download. Check the connection once, then try the scan again. The PDF is not uploaded.");
+    pack = "eng";
   }
+
+  onProgress?.(pack === "eng" ? "Preparing the on-device reader…" : `Preparing the ${packLabel(pack)} reader…`);
+  let worker: OcrWorker;
+  try {
+    worker = await openReader(pack, onProgress);
+  } catch {
+    if (pack === "eng") {
+      first.width = 0;
+      first.height = 0;
+      throw new Error("The on-device reader could not download. Check the connection once, then try the scan again. The PDF is not uploaded.");
+    }
+    try {
+      pack = "eng";
+      onProgress?.("Preparing the on-device reader…");
+      worker = await openReader("eng", onProgress);
+    } catch {
+      first.width = 0;
+      first.height = 0;
+      throw new Error("The on-device reader could not download. Check the connection once, then try the scan again. The PDF is not uploaded.");
+    }
+  }
+
   const lines: string[] = [];
   try {
-    for (let index = 1; index <= pageCount; index += 1) {
+    if (pack === "eng") {
+      const firstText = cleanOcr((await worker.recognize(first)).data.text ?? "");
+      const latin = detectScanLanguage(firstText);
+      if (latin) {
+        onProgress?.(`Switching the reader to ${latin.label}…`);
+        try {
+          await worker.reinitialize(`eng+${latin.tess}`);
+          lines.push(cleanOcr((await worker.recognize(first)).data.text ?? ""));
+        } catch {
+          lines.push(firstText);
+        }
+      } else {
+        lines.push(firstText);
+      }
+    }
+    const start = lines.length > 0 ? 2 : 1;
+    for (let index = start; index <= pageCount; index += 1) {
       onProgress?.(`Reading the scan, page ${index} of ${pageCount}…`);
+      const canvas = index === 1 ? first : await renderPage(doc, index);
       try {
-        const page = await doc.getPage(index);
-        const scale = canvasScale(page);
-        const viewport = page.getViewport({ scale });
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.ceil(viewport.width);
-        canvas.height = Math.ceil(viewport.height);
-        await page.render({ canvas, viewport }).promise;
         const result = await worker.recognize(canvas);
-        canvas.width = 0;
-        canvas.height = 0;
         lines.push(cleanOcr(result.data.text ?? ""));
       } catch {
         lines.push("");
       }
+      if (canvas !== first) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
     }
   } finally {
+    first.width = 0;
+    first.height = 0;
     await worker.terminate().catch(() => undefined);
   }
   return lines;
+}
+
+type OcrWorker = {
+  recognize: (image: HTMLCanvasElement) => Promise<{ data: { text?: string } }>;
+  reinitialize: (langs: string) => Promise<unknown>;
+  terminate: () => Promise<unknown>;
+};
+
+async function openReader(langs: string, onProgress?: (message: string) => void): Promise<OcrWorker> {
+  const { createWorker } = await import("tesseract.js");
+  return createWorker(langs, 1, {
+    logger(message) {
+      if ((message.status ?? "").startsWith("loading")) {
+        onProgress?.(langs === "eng" ? "Preparing the on-device reader…" : `Preparing the ${packLabel(langs)} reader…`);
+      }
+    },
+  });
+}
+
+function packLabel(pack: string): string {
+  const labels: Record<string, string> = {
+    "rus+bul+eng": "Cyrillic",
+    "ell+eng": "Greek",
+    "ara+eng": "Arabic",
+    "heb+eng": "Hebrew",
+    "tha+eng": "Thai",
+    "kor+eng": "Korean",
+    "jpn+eng": "Japanese",
+    "chi_sim+chi_tra+eng": "Chinese",
+    "hin+eng": "Hindi",
+    "khm+eng": "Khmer",
+  };
+  return labels[pack] ?? "on-device";
+}
+
+function langsForScript(script: string | null): string {
+  const name = (script ?? "").toLowerCase();
+  if (!name || name.includes("latin") || name === "common") return "eng";
+  if (name.includes("cyrillic")) return "rus+bul+eng";
+  if (name.includes("greek")) return "ell+eng";
+  if (name.includes("arabic")) return "ara+eng";
+  if (name.includes("hebrew")) return "heb+eng";
+  if (name.includes("thai")) return "tha+eng";
+  if (name.includes("hangul") || name.includes("korean")) return "kor+eng";
+  if (name.includes("hiragana") || name.includes("katakana") || name.includes("japanese")) return "jpn+eng";
+  if (name.includes("han") || name.includes("chinese")) return "chi_sim+chi_tra+eng";
+  if (name.includes("devanagari")) return "hin+eng";
+  if (name.includes("khmer")) return "khm+eng";
+  return "eng";
+}
+
+async function renderPage(doc: PdfDoc, index: number): Promise<HTMLCanvasElement> {
+  const page = await doc.getPage(index);
+  const scale = canvasScale(page);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  await page.render({ canvas, viewport }).promise;
+  return canvas;
 }
 
 function canvasScale(page: PdfPage): number {
@@ -269,17 +369,100 @@ export function collectParties(record: OfficialRecord | null, pdfText: string): 
   return buckets;
 }
 
-export function biblioFromPdf(text: string): { abstract: string; claims: string[] } {
+export function numbersFromText(text: string): PatentNumber[] {
+  const head = text.slice(0, 12_000);
+  const flat = head.replace(/\s+/g, " ");
+  const found: PatentNumber[] = [];
+  const add = (label: string, value: string) => {
+    const clean = value.replace(/\s+/g, " ").replace(/^[\s,:;-]+|[\s,:;-]+$/g, "").trim();
+    if (clean.length < 4 || clean.length > 40) return;
+    const key = `${label}|${clean.replace(/[^A-Za-z0-9]/g, "").toUpperCase()}`;
+    if (found.some((item) => `${item.label}|${item.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase()}` === key)) return;
+    found.push({ label, value: clean });
+  };
+  const publication = findPublicationId(head);
+  if (publication) add("Publication", publication);
+  const labeled: [string, RegExp][] = [
+    ["Publication", /\(\s*(?:10|11)\s*\)\s*((?:US|EP|WO|CN|JP|KR|GB|DE|FR|CA|AU|IN|DK)\s*[\d\s./,]{4,22}(?:\s*[A-Z]\d?)?)/i],
+    ["Application", /\(\s*21\s*\)\s*([A-Z]{0,2}\s*\d[\d\s./,]{3,22})/i],
+    ["Application", /\bapplication\s*(?:number|no\.?)\s*[:\s]\s*([A-Z]{0,2}\s*\d[\d\s./,]{3,22})/i],
+    ["PCT application", /\(\s*86\s*\)\s*(PCT\s*\/\s*[A-Z]{2}\s*\d{2,4}\s*\/\s*\d{3,8})/i],
+    ["PCT publication", /\(\s*87\s*\)\s*(WO\s*\d{2,4}\s*\/?\s*\d{4,8}(?:\s*[A-Z]\d?)?)/i],
+    ["Priority", /\(\s*30\s*\)\s*([A-Z]{2}[\s,]+\d[\d\s./,]{3,24})/i],
+    ["Priority", /\(\s*31\s*\)\s*([A-Z0-9][\d\s./,]{4,24})/i],
+  ];
+  for (const [label, pattern] of labeled) {
+    const match = flat.match(pattern);
+    if (match?.[1]) add(label, label.startsWith("PCT") ? match[1].replace(/\s+/g, "") : match[1]);
+  }
+  for (const match of flat.matchAll(/\b(PCT\/[A-Z]{2}\d{2,4}\/\d{3,8})\b/gi)) add("PCT application", match[1] ?? "");
+  for (const match of flat.matchAll(/\b(WO\d{4}\/?\d{5,7}[A-Z]\d?)\b/gi)) add("PCT publication", match[1] ?? "");
+  return found;
+}
+
+export function collectNumbers(record: OfficialRecord | null, pdfText: string): PatentNumber[] {
+  const found: PatentNumber[] = [];
+  const seen = new Set<string>();
+  const add = (label: string, value: string) => {
+    const clean = value.replace(/\s+/g, " ").trim();
+    const key = `${label}|${clean.replace(/[^A-Za-z0-9]/g, "").toUpperCase()}`;
+    if (clean.length < 4 || seen.has(key)) return;
+    seen.add(key);
+    found.push({ label, value: clean });
+  };
+  if (record?.id) add("Publication", record.id);
+  for (const item of record?.numbers ?? []) add(item.label, item.value);
+  for (const item of numbersFromText(pdfText)) add(item.label, item.value);
+  const rank: Record<string, number> = {
+    Publication: 0,
+    Application: 1,
+    "Other publication": 2,
+    "PCT application": 3,
+    "PCT publication": 4,
+    Priority: 5,
+  };
+  return found.sort((a, b) => (rank[a.label] ?? 9) - (rank[b.label] ?? 9)).slice(0, 12);
+}
+
+export type PdfBiblio = {
+  abstract: string;
+  background: string;
+  claims: { number: string; text: string }[];
+};
+
+export function biblioFromPdf(text: string): PdfBiblio {
   const flat = text.replace(/\s+/g, " ");
-  const abstractMatch = flat.match(/\babstract\b(.{40,1800}?)(?=\b(claims|background|field of the invention|description|technical field)\b)/i);
+  const abstractMatch = flat.match(/\babstract\b(.{40,1800}?)(?=\b(?:claims|background|field of the invention|description|technical field)\b)/i);
   const claimZone = flat.split(/\bwhat is claimed is\b|\bclaims\b/i)[1] ?? "";
-  const claims: string[] = [];
-  for (const match of claimZone.matchAll(/(?:^|\s)(\d{1,3})\.\s+(.*?)(?=(?:\s\d{1,3}\.\s)|$)/g)) {
-    const body = (match[2] ?? "").trim();
+  const claims: { number: string; text: string }[] = [];
+  const claimRe = /(?:\[(\d{1,5})\]|(?:^|\s)(\d{1,4})\.)\s+(.*?)(?=(?:\s\[\d{1,5}\]|\s\d{1,4}\.)\s|$)/g;
+  for (const match of claimZone.matchAll(claimRe)) {
+    const body = (match[3] ?? "").trim();
     if (body.length < 40) continue;
     const independent = !/\b(of|to|in|according to)\s+claims?\s+\d+/i.test(body);
-    if (independent || claims.length < 2) claims.push(body.slice(0, 900));
-    if (claims.filter(Boolean).length >= 4) break;
+    if (independent || claims.length < 2) {
+      claims.push({ number: displayClaimNumber(match[1] || match[2] || String(claims.length + 1)), text: body.slice(0, 900) });
+    }
+    if (claims.length >= 4) break;
   }
-  return { abstract: (abstractMatch?.[1] ?? "").trim(), claims };
+  return {
+    abstract: (abstractMatch?.[1] ?? "").trim(),
+    background: pullBackground(flat),
+    claims,
+  };
+}
+
+function pullBackground(flat: string): string {
+  const descAt = flat.search(/\bdescription\b/i);
+  const region = descAt >= 0 ? flat.slice(descAt, descAt + 14_000) : flat.slice(0, 14_000);
+  const start = region.search(/\bbackground(?:\s+of\s+the\s+(?:invention|disclosure))?\b/i);
+  if (start < 0) return "";
+  const after = region.slice(start).replace(/^background(?:\s+of\s+the\s+(?:invention|disclosure))?/i, "").trim();
+  const stop = after.search(
+    /\b(?:summary(?:\s+of\s+the\s+(?:invention|disclosure))?|brief description|detailed description|description of (?:the )?(?:drawings|figures|embodiments)|objects of the invention)\b/i,
+  );
+  const body = (stop > 120 ? after.slice(0, stop) : after.slice(0, 3200)).replace(/\s+/g, " ").trim();
+  const cleaned = body.replace(/^(?:\[\d{3,5}\]\s*)+/, "").trim();
+  if (cleaned.length < 80) return "";
+  return cleaned.slice(0, 3500);
 }

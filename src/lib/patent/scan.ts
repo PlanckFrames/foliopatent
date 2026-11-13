@@ -315,22 +315,78 @@ function toTitle(value: string): string {
   return lower.charAt(0).toUpperCase() + lower.slice(1);
 }
 
-export function detectLanguage(text: string): { code: string; label: string } {
-  const sample = text.slice(0, 2500);
+type LatinHint = { code: string; tess: string; label: string; pattern: string };
+
+const LATIN_HINTS: LatinHint[] = [
+  { code: "da", tess: "dan", label: "Danish", pattern: "opfinder|patenthaver|ansøger|ansoeger|fremgangsmåde|fremgangsmade|kendetegnet|opfindelsen" },
+  { code: "nl", tess: "nld", label: "Dutch", pattern: "octrooi|aanvrager|uitvinder|werkwijze|gekenmerkt|inrichting|octrooiaanvrage" },
+  { code: "de", tess: "deu", label: "German", pattern: "vorrichtung|dadurch|gekennzeichnet|erfinder|anmelder|patentinhaber|anspruch|erfindung" },
+  { code: "fr", tess: "fra", label: "French", pattern: "procédé|procede|dispositif|caractérisé|caracterise|inventeur|demandeur|revendication|invention" },
+  { code: "es", tess: "spa", label: "Spanish", pattern: "dispositivo|caracterizado|reivindicación|reivindicacion|invención|invencion|solicitante|método|metodo" },
+  { code: "pt", tess: "por", label: "Portuguese", pattern: "caracterizado|reivindicação|reivindicacao|dispositivo|invenção|invencao|requerente|compreendendo" },
+  { code: "it", tess: "ita", label: "Italian", pattern: "caratterizzato|rivendicazione|dispositivo|invenzione|richiedente|comprendente|procedimento" },
+  { code: "sv", tess: "swe", label: "Swedish", pattern: "kännetecknad|kannetecknad|uppfinning|anordning|förfarande|forfarande|patentkrav|sökande|sokande" },
+  { code: "no", tess: "nor", label: "Norwegian", pattern: "kjennetegnet|oppfinnelse|anordning|oppfinner|patentkrav|søker|soker" },
+  { code: "fi", tess: "fin", label: "Finnish", pattern: "tunnettu|keksintö|keksinto|menetelmä|menetelma|patenttivaatimus|laitteisto" },
+  { code: "pl", tess: "pol", label: "Polish", pattern: "znamienny|wynalazek|urządzenie|urzadzenie|zastrzeżenie|zastrzezenie|wynalazca|zgłaszający|zglaszajacy" },
+  { code: "ro", tess: "ron", label: "Romanian", pattern: "caracterizat|invenție|inventie|revendicare|dispozitiv|solicitant|procedeul" },
+  { code: "tr", tess: "tur", label: "Turkish", pattern: "buluş|bulus|istem|cihaz|yöntem|yontem|başvuru|basvuru|mucit" },
+  { code: "lt", tess: "lit", label: "Lithuanian", pattern: "išradimas|isradimas|įrenginys|irenginys|apibrėžtas|apibreztas|išradėjas|isradejas" },
+  { code: "lv", tess: "lav", label: "Latvian", pattern: "izgudrojums|ierīce|ierice|paņēmiens|panemiens|pretenzija|izgudrotājs|izgudrotajs" },
+  { code: "af", tess: "afr", label: "Afrikaans", pattern: "uitvinding|werkwyse|gekenmerk|toestel|aansoeker|uitvinder" },
+  { code: "id", tess: "ind", label: "Indonesian", pattern: "penemuan|perangkat|dicirikan|pemohon|penemu" },
+  { code: "ms", tess: "msa", label: "Malay", pattern: "ciptaan|peranti|kaedah|dicirikan|pemohon|pereka" },
+  { code: "vi", tess: "vie", label: "Vietnamese", pattern: "sáng chế|sang che|thiết bị|thiet bi|phương pháp|phuong phap" },
+  { code: "fil", tess: "fil", label: "Filipino", pattern: "imbensyon|pamamaraan|imbentor" },
+  { code: "sw", tess: "swa", label: "Swahili", pattern: "uvumbuzi|kifaa|mvumbuzi" },
+  { code: "en", tess: "eng", label: "English", pattern: "comprising|wherein|invention|assignee|applicant|claim|device|method" },
+];
+
+function countTerms(sample: string, pattern: string): number {
+  const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])(?:${pattern})(?![\\p{L}\\p{N}])`, "giu");
+  return sample.match(re)?.length ?? 0;
+}
+
+function scriptLanguage(sample: string): { code: string; label: string } | null {
   if (/[\u3040-\u30ff]/.test(sample)) return { code: "ja", label: "Japanese" };
   if (/[\uac00-\ud7af]/.test(sample)) return { code: "ko", label: "Korean" };
   if (/[\u4e00-\u9fff]/.test(sample)) return { code: "zh", label: "Chinese" };
-  if (/[\u0400-\u04ff]/.test(sample)) return { code: "ru", label: "Russian" };
-  const scores: { code: string; label: string; re: RegExp }[] = [
-    { code: "de", label: "German", re: /\b(und|der|die|das|nicht|verfahren|vorrichtung|dadurch|gekennzeichnet)\b/gi },
-    { code: "fr", label: "French", re: /\b(les|des|une|procédé|dispositif|caractérisé|dans)\b/gi },
-    { code: "es", label: "Spanish", re: /\b(los|las|una|método|dispositivo|caracterizado|para)\b/gi },
-    { code: "en", label: "English", re: /\b(the|and|comprising|wherein|method|device|claim)\b/gi },
-  ];
-  let best = { code: "en", label: "English", hits: 0 };
-  for (const score of scores) {
-    const hits = sample.match(score.re)?.length ?? 0;
-    if (hits > best.hits) best = { code: score.code, label: score.label, hits };
+  if (/[\u0590-\u05ff]/.test(sample)) return { code: "he", label: "Hebrew" };
+  if (/[\u0600-\u06ff]/.test(sample)) return { code: "ar", label: "Arabic" };
+  if (/[\u0e00-\u0e7f]/.test(sample)) return { code: "th", label: "Thai" };
+  if (/[\u0900-\u097f]/.test(sample)) return { code: "hi", label: "Hindi" };
+  if (/[\u0370-\u03ff]/.test(sample)) return { code: "el", label: "Greek" };
+  if (/[\u1780-\u17ff]/.test(sample)) return { code: "km", label: "Khmer" };
+  if (/[\u0400-\u04ff]/.test(sample)) {
+    if (/[ъьюя]/.test(sample.toLowerCase()) && /[щыэ]/.test(sample.toLowerCase()) === false && /\b(изобретение|устройство|заявител)\b/i.test(sample)) {
+      return { code: "bg", label: "Bulgarian" };
+    }
+    if (/\b(изобретение|заявител|претенц)\b/i.test(sample)) return { code: "bg", label: "Bulgarian" };
+    return { code: "ru", label: "Russian" };
   }
-  return { code: best.code, label: best.label };
+  return null;
+}
+
+function latinHits(sample: string): { hint: LatinHint; hits: number }[] {
+  return LATIN_HINTS.map((hint) => ({ hint, hits: countTerms(sample, hint.pattern) })).sort((a, b) => b.hits - a.hits);
+}
+
+export function detectLanguage(text: string): { code: string; label: string } {
+  const sample = text.slice(0, 2500);
+  const script = scriptLanguage(sample);
+  if (script) return script;
+  const ranked = latinHits(sample);
+  const best = ranked[0];
+  if (!best || best.hits < 3) return { code: "en", label: "English" };
+  return { code: best.hint.code, label: best.hint.label };
+}
+
+export function detectScanLanguage(text: string): { tess: string; label: string } | null {
+  const sample = text.slice(0, 2500);
+  if (scriptLanguage(sample)) return null;
+  const ranked = latinHits(sample);
+  const english = ranked.find((item) => item.hint.tess === "eng")?.hits ?? 0;
+  const other = ranked.find((item) => item.hint.tess !== "eng");
+  if (!other || other.hits < 3 || other.hits < english) return null;
+  return { tess: other.hint.tess, label: other.hint.label };
 }

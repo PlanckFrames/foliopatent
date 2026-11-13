@@ -96,14 +96,83 @@ export function firstSentences(text: string, count: number): string {
   return parts.slice(0, count).join(" ");
 }
 
-export function claimPoints(text: string): string[] {
-  const body = text.replace(/^\s*\d+\.\s*/, "").replace(/\s+/g, " ").trim();
-  if (!body) return [];
-  const parts = body.split(/;\s+/).map((part) => part.trim()).filter((part) => part.length > 24);
-  const source = parts.length >= 2 ? parts : [body];
-  return source.slice(0, 3).map((part) => {
-    const clean = part.replace(/[,:;]\s*$/, "");
-    if (clean.length <= 150) return clean;
-    return `${clean.slice(0, 147).replace(/\s+\S*$/, "")}…`;
-  });
+export function displayClaimNumber(value: string): string {
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const number = Number.parseInt(trimmed, 10);
+    if (Number.isFinite(number)) return String(number);
+  }
+  return trimmed;
+}
+
+const FILING_PLACES: Record<string, { country: string; office: string }> = {
+  US: { country: "United States", office: "United States Patent and Trademark Office" },
+  EP: { country: "Europe", office: "European Patent Office" },
+  WO: { country: "International (PCT)", office: "World Intellectual Property Organization" },
+  DK: { country: "Denmark", office: "Danish Patent and Trademark Office" },
+  CN: { country: "China", office: "China National Intellectual Property Administration" },
+  JP: { country: "Japan", office: "Japan Patent Office" },
+  KR: { country: "South Korea", office: "Korean Intellectual Property Office" },
+  GB: { country: "United Kingdom", office: "UK Intellectual Property Office" },
+  DE: { country: "Germany", office: "German Patent and Trade Mark Office" },
+  FR: { country: "France", office: "National Institute of Industrial Property" },
+  CA: { country: "Canada", office: "Canadian Intellectual Property Office" },
+  AU: { country: "Australia", office: "IP Australia" },
+  IN: { country: "India", office: "Indian Patent Office" },
+  AT: { country: "Austria", office: "Austrian Patent Office" },
+  BE: { country: "Belgium", office: "Belgian Office for Intellectual Property" },
+  BR: { country: "Brazil", office: "National Institute of Industrial Property" },
+  CH: { country: "Switzerland", office: "Swiss Federal Institute of Intellectual Property" },
+  CZ: { country: "Czechia", office: "Industrial Property Office" },
+  ES: { country: "Spain", office: "Spanish Patent and Trademark Office" },
+  FI: { country: "Finland", office: "Finnish Patent and Registration Office" },
+  HU: { country: "Hungary", office: "Hungarian Intellectual Property Office" },
+  IE: { country: "Ireland", office: "Intellectual Property Office of Ireland" },
+  IL: { country: "Israel", office: "Israel Patent Office" },
+  IT: { country: "Italy", office: "Italian Patent and Trademark Office" },
+  MX: { country: "Mexico", office: "Mexican Institute of Industrial Property" },
+  NL: { country: "Netherlands", office: "Netherlands Patent Office" },
+  NO: { country: "Norway", office: "Norwegian Industrial Property Office" },
+  NZ: { country: "New Zealand", office: "Intellectual Property Office of New Zealand" },
+  PL: { country: "Poland", office: "Patent Office of the Republic of Poland" },
+  PT: { country: "Portugal", office: "Portuguese Institute of Industrial Property" },
+  RU: { country: "Russia", office: "Federal Service for Intellectual Property" },
+  SE: { country: "Sweden", office: "Swedish Intellectual Property Office" },
+  SG: { country: "Singapore", office: "Intellectual Property Office of Singapore" },
+  TW: { country: "Taiwan", office: "Taiwan Intellectual Property Office" },
+  ZA: { country: "South Africa", office: "Companies and Intellectual Property Commission" },
+  HK: { country: "Hong Kong", office: "Intellectual Property Department" },
+  TR: { country: "Turkey", office: "Turkish Patent and Trademark Office" },
+  UA: { country: "Ukraine", office: "Ukrainian Intellectual Property Institute" },
+  AR: { country: "Argentina", office: "National Institute of Industrial Property" },
+  CL: { country: "Chile", office: "National Institute of Industrial Property" },
+  CO: { country: "Colombia", office: "Superintendence of Industry and Commerce" },
+  MY: { country: "Malaysia", office: "Intellectual Property Corporation of Malaysia" },
+  ID: { country: "Indonesia", office: "Directorate General of Intellectual Property" },
+  TH: { country: "Thailand", office: "Department of Intellectual Property" },
+  VN: { country: "Vietnam", office: "Intellectual Property Office of Vietnam" },
+  PH: { country: "Philippines", office: "Intellectual Property Office of the Philippines" },
+  GR: { country: "Greece", office: "Hellenic Industrial Property Organisation" },
+  RO: { country: "Romania", office: "State Office for Inventions and Trademarks" },
+  BG: { country: "Bulgaria", office: "Patent Office of the Republic of Bulgaria" },
+  SK: { country: "Slovakia", office: "Industrial Property Office" },
+  SI: { country: "Slovenia", office: "Slovenian Intellectual Property Office" },
+  HR: { country: "Croatia", office: "State Intellectual Property Office" },
+  CY: { country: "Cyprus", office: "Department of Registrar of Companies and Intellectual Property" },
+  MT: { country: "Malta", office: "Industrial Property Registrations Directorate" },
+  LT: { country: "Lithuania", office: "State Patent Bureau" },
+  LV: { country: "Latvia", office: "Patent Office of the Republic of Latvia" },
+  EE: { country: "Estonia", office: "Estonian Patent Office" },
+  IS: { country: "Iceland", office: "Icelandic Intellectual Property Office" },
+  LU: { country: "Luxembourg", office: "Intellectual Property Office" },
+  AP: { country: "African Regional", office: "African Regional Intellectual Property Organization" },
+  EA: { country: "Eurasian", office: "Eurasian Patent Organization" },
+  OA: { country: "OAPI", office: "African Intellectual Property Organization" },
+  GC: { country: "Gulf", office: "Gulf Cooperation Council Patent Office" },
+};
+
+export function filingPlace(code: string): { country: string; office: string } {
+  const key = code.trim().toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
+  if (!key) return { country: "Unknown", office: "Unknown office" };
+  return FILING_PLACES[key] ?? { country: key, office: `${key} patent office` };
 }

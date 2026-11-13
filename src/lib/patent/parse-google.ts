@@ -1,5 +1,5 @@
-import type { Citation, ClaimText, OfficialRecord, RelatedCase } from "./types";
-import { decodeEntities, officeFromId, stripTags } from "./text";
+import type { Citation, ClaimText, OfficialRecord, PatentNumber, RelatedCase } from "./types";
+import { decodeEntities, displayClaimNumber, officeFromId, stripTags } from "./text";
 
 function unique(values: string[]): string[] {
   const seen = new Set<string>();
@@ -51,7 +51,7 @@ function extractClaims(html: string): ClaimText[] {
   for (let index = 0; index < marks.length; index += 1) {
     const mark = marks[index];
     if (!mark) continue;
-    const number = mark[1] || mark[2] || String(claims.length + 1);
+    const number = displayClaimNumber(mark[1] || mark[2] || String(claims.length + 1));
     const bodyStart = (mark.index ?? 0) + mark[0].length;
     const bodyEnd = index + 1 < marks.length ? (marks[index + 1]?.index ?? slice.length) : slice.length;
     const texts = [...slice.slice(bodyStart, bodyEnd).matchAll(/<div\b[^>]*class="claim-text"[^>]*>([\s\S]*?)<\/div>/gi)].map(
@@ -111,6 +111,39 @@ function extractFamily(html: string, home: string) {
     }
   }
   return members.slice(0, 20);
+}
+
+function numbersFromGoogle(head: string, id: string): PatentNumber[] {
+  const window = head.slice(0, 30_000);
+  const numbers: PatentNumber[] = [];
+  const seen = new Set<string>();
+  const add = (label: string, value: string) => {
+    const clean = value.replace(/\s+/g, " ").trim();
+    const key = `${label}|${clean.replace(/[^A-Za-z0-9]/g, "").toUpperCase()}`;
+    if (clean.length < 4 || seen.has(key)) return;
+    const compact = clean.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    if (label !== "Publication" && compact === id.replace(/[^A-Z0-9]/g, "")) return;
+    seen.add(key);
+    numbers.push({ label, value: clean });
+  };
+  add("Publication", id);
+  const application = blockValues(window, "applicationNumber")[0];
+  if (application) add("Application", application);
+  const office = id.slice(0, 2);
+  for (const publication of blockValues(window, "publicationNumber")) {
+    const compact = publication.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    const sameOffice = compact.slice(0, 2) === office;
+    const pct = compact.startsWith("WO");
+    if (!sameOffice && !pct) continue;
+    add(pct && office !== "WO" ? "PCT publication" : "Other publication", publication);
+    if (numbers.filter((item) => item.label === "Other publication").length >= 6) break;
+  }
+  for (const match of window.matchAll(/\b(PCT\/[A-Z]{2}\d{2,4}\/\d{3,8})\b/gi)) add("PCT application", (match[1] ?? "").toUpperCase());
+  for (const row of window.matchAll(/<tr itemprop="priorityApps"[\s\S]*?<\/tr>/gi)) {
+    const priority = blockValues(row[0], "applicationNumber")[0];
+    if (priority) add("Priority", priority);
+  }
+  return numbers;
 }
 
 function extractRelated(html: string, selfId: string): RelatedCase[] {
@@ -245,6 +278,7 @@ export function parseGooglePatent(html: string, requestedId: string): OfficialRe
     claims,
     excerpt,
     dates,
+    numbers: numbersFromGoogle(head, idFromTitle),
     officeCode: office.code,
     officeName: office.name,
     citations: extractCitations(html),

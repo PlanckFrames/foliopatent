@@ -37,6 +37,11 @@ export type Classification = {
   description: string;
 };
 
+export type PatentNumber = {
+  label: string;
+  value: string;
+};
+
 export type OfficialRecord = {
   id: string;
   title: string;
@@ -47,6 +52,7 @@ export type OfficialRecord = {
   claims: ClaimText[];
   excerpt: string;
   dates: DatedFact[];
+  numbers: PatentNumber[];
   officeCode: string;
   officeName: string;
   citations: Citation[];
@@ -79,9 +85,9 @@ export type ClaimNote = {
 
 export type Brief = {
   abstractSummary: string;
+  backgroundSummary: string;
   patentSummary: string;
   claimNotes: ClaimNote[];
-  translation: string;
   source: "brief" | "extract";
 };
 

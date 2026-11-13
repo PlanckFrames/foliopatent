@@ -11,7 +11,7 @@ export const Route = createRootRoute({
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: APP_NAME },
-      { name: "description", content: "Full patent analysis: inventors, owners, claims, chemistry, organisms, and translation." },
+      { name: "description", content: "Full patent analysis: numbers, inventors, owners, claims in plain English, chemistry, and family filings." },
       { name: "theme-color", content: "#f3efe6" },
     ],
     links: [

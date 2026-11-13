@@ -1,5 +1,5 @@
-import type { Citation, ClaimText, Classification, FamilyMember, OfficialRecord, RelatedCase } from "./types";
-import { officeFromId, stripTags } from "./text";
+import type { Citation, ClaimText, Classification, FamilyMember, OfficialRecord, PatentNumber, RelatedCase } from "./types";
+import { displayClaimNumber, officeFromId, stripTags } from "./text";
 
 type SerpParty = string | { name?: string };
 type SerpCitation = { publication_number?: string; title?: string; assignee_original?: string };
@@ -23,6 +23,8 @@ type SerpDetails = {
   priority_date?: string;
   filing_date?: string;
   publication_date?: string;
+  application_number?: string;
+  priority_applications?: { application_number?: string; representative_publication?: string }[];
   prior_art_keywords?: string[];
   classifications?: { code?: string; description?: string; leaf?: boolean }[];
   events?: { date?: string; title?: string; type?: string }[];
@@ -53,7 +55,7 @@ function pickClaims(raw: unknown[]): ClaimText[] {
   for (const item of raw) {
     const text = (typeof item === "string" ? item : "").replace(/\s+/g, " ").trim();
     if (text.length < 24) continue;
-    const number = text.match(/^(\d+)\./)?.[1] ?? String(claims.length + 1);
+    const number = displayClaimNumber(text.match(/^(\d+)\./)?.[1] ?? String(claims.length + 1));
     claims.push({ number, text: text.slice(0, 1800), independent: isIndependent(text) });
     if (claims.length >= 24) break;
   }
@@ -109,6 +111,34 @@ function relatedFrom(items: SerpRelated[] | undefined, fallback: string): Relate
     if (related.length >= 12) break;
   }
   return related;
+}
+
+function numbersFromSerp(body: SerpDetails, id: string, office: string): PatentNumber[] {
+  const numbers: PatentNumber[] = [];
+  const seen = new Set<string>();
+  const add = (label: string, value: string) => {
+    const clean = value.replace(/\s+/g, " ").trim();
+    const compact = clean.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    const key = `${label}|${compact}`;
+    if (clean.length < 4 || seen.has(key)) return;
+    if (label !== "Publication" && compact === id) return;
+    seen.add(key);
+    numbers.push({ label, value: clean });
+  };
+  add("Publication", id);
+  if (body.application_number) add("Application", body.application_number);
+  for (const item of body.priority_applications ?? []) {
+    const value = item.application_number || item.representative_publication || "";
+    if (value) add("Priority", value);
+  }
+  for (const year of Object.values(body.worldwide_applications ?? {})) {
+    for (const app of year ?? []) {
+      if (!app.this_app) continue;
+      const number = cleanId(app.document_id ?? "");
+      if (number && number.slice(0, 2) === office) add("Other publication", number);
+    }
+  }
+  return numbers.slice(0, 12);
 }
 
 export function mapSerpDetails(body: SerpDetails, requestedId: string): OfficialRecord | null {
@@ -169,6 +199,7 @@ export function mapSerpDetails(body: SerpDetails, requestedId: string): Official
     claims,
     excerpt: "",
     dates,
+    numbers: numbersFromSerp(body, id, office.code),
     officeCode: office.code,
     officeName: office.name,
     citations,
