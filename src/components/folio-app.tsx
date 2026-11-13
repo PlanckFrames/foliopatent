@@ -17,7 +17,7 @@ import {
 import { explainPatent, lookupPatent, readPatentPages, translateFrontMatter } from "@/lib/patent/server-fns";
 import { biblioFromPdf, collectNumbers, collectParties, extractPdfText, findPublicationId, inventorColumns, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
 import { absorbFindings, detectLanguage, scanText, type PageFinding } from "@/lib/patent/scan";
-import { displayClaimNumber, filingPlace, grokUrl, patentUrl, plainClaimBullets, readingChunksFromExcerpt, selectReadingPages, wikiSearch, type ReadingPage } from "@/lib/patent/text";
+import { displayClaimNumber, filingPlace, grokUrl, patentUrl, plainClaimBullets, readingChunksFromExcerpt, samePassage, selectReadingPages, wikiSearch, type ReadingPage } from "@/lib/patent/text";
 import type { Brief, OfficialRecord, PatentNumber, Scan } from "@/lib/patent/types";
 
 const SAMPLES = [
@@ -184,7 +184,8 @@ export function FolioApp() {
       const pdfBiblio = pdfText ? biblioFromPdf(pdfText) : { abstract: "", background: "", claims: [] };
       const excerptBiblio = record?.excerpt ? biblioFromPdf(record.excerpt) : { abstract: "", background: "", claims: [] };
       const abstract = record?.abstract || pdfBiblio.abstract || excerptBiblio.abstract;
-      const background = pdfBiblio.background || excerptBiblio.background;
+      const backgroundSource = pdfBiblio.background || excerptBiblio.background;
+      const background = samePassage(abstract, backgroundSource) ? "" : backgroundSource;
       const sourceTitle = record?.title || titleFromPdf(pdfText) || fileLabel || "Uploaded patent";
       const sourceClaims =
         record && record.claims.length > 0
@@ -541,7 +542,7 @@ function pageReadingNote(input: {
   if (input.pages === 0) return "";
   const noun = input.fromRecord ? "section" : "page";
   if (input.unavailable) {
-    return "The page-by-page reader was unavailable, so technologies, chemicals, organisms, and materials use the English glossary only.";
+    return "The page-by-page reader was unavailable, so only names that can be recognized in the text are listed.";
   }
   const tail = [
     input.examples > 0
@@ -561,8 +562,8 @@ function pageReadingNote(input: {
 
 function ReportView({ report }: { report: Report }) {
   const record = report.record;
-  const hasAbstract = Boolean(report.brief.abstractSummary);
-  const hasBackground = Boolean(report.brief.backgroundSummary);
+  const abstractText = report.displayAbstract.trim();
+  const backgroundText = samePassage(abstractText, report.brief.backgroundSummary) ? "" : report.brief.backgroundSummary.trim();
   return (
     <article className="mt-10 lg:grid lg:grid-cols-[12.5rem_minmax(0,1fr)] lg:items-start lg:gap-8">
       <nav
@@ -637,10 +638,10 @@ function ReportView({ report }: { report: Report }) {
         </Section>
         <Section n={sectionNumber("purpose")} id="purpose" title="Purpose" icon={<ScrollText className="size-4" />}>
           <p className="text-sm font-semibold text-copper">Abstract</p>
-          {report.displayAbstract ? (
-            <p className="mt-2 text-lg leading-relaxed">{report.displayAbstract}</p>
-          ) : hasAbstract || hasBackground ? (
-            <p className="mt-2 text-lg leading-relaxed">{report.brief.abstractSummary || report.brief.backgroundSummary}</p>
+          {abstractText ? (
+            <p className="mt-2 text-lg leading-relaxed">{abstractText}</p>
+          ) : backgroundText ? (
+            <p className="mt-2 leading-relaxed text-muted">There is no abstract. The patent supplies a background section instead.</p>
           ) : (
             <p className="mt-2 leading-relaxed text-muted">No abstract was available.</p>
           )}
@@ -650,15 +651,17 @@ function ReportView({ report }: { report: Report }) {
               <p className="mt-2 text-sm leading-relaxed text-muted">{report.originalAbstract}</p>
             </details>
           ) : null}
-          {hasBackground ? (
-            <>
-              <p className="mt-5 text-sm font-semibold text-copper">Background</p>
-              <p className="mt-2 leading-relaxed">{report.brief.backgroundSummary}</p>
-            </>
-          ) : null}
+          <p className="mt-5 text-sm font-semibold text-copper">Background</p>
+          {backgroundText ? (
+            <p className="mt-2 leading-relaxed">{backgroundText}</p>
+          ) : abstractText ? (
+            <p className="mt-2 leading-relaxed text-muted">There is no background section other than the abstract.</p>
+          ) : (
+            <p className="mt-2 leading-relaxed text-muted">No background section was found.</p>
+          )}
           <p className="mt-5 text-sm font-semibold text-copper">In plain language</p>
           <p className="mt-2 text-lg leading-relaxed">{report.brief.patentSummary}</p>
-          {report.brief.source === "brief" && report.brief.abstractSummary ? (
+          {report.brief.source === "brief" && report.brief.abstractSummary && !samePassage(report.brief.abstractSummary, abstractText) ? (
             <p className="mt-3 leading-relaxed text-muted">{report.brief.abstractSummary}</p>
           ) : null}
         </Section>
@@ -703,7 +706,7 @@ function ReportView({ report }: { report: Report }) {
           )}
         </Section>
         <Section n={sectionNumber("technologies")} id="technologies" title="Technologies" icon={<Search className="size-4" />}>
-          <TechList items={report.scan.technologies} empty="No familiar technology terms or classification leaves were found." />
+          <TechList items={report.scan.technologies} empty="No named methods, instruments, or classification codes were found in the text that was read." />
         </Section>
         <Section n={sectionNumber("chemicals")} id="chemicals" title="Chemicals" icon={<FlaskConical className="size-4" />}>
           {report.scan.chemicals.length > 0 ? (
@@ -728,14 +731,14 @@ function ReportView({ report }: { report: Report }) {
               ))}
             </ul>
           ) : (
-            <Empty>No listed compounds, CAS numbers, or SMILES strings were found in the text that was read.</Empty>
+            <Empty>No named substances, formulas, or CAS numbers were found in the text that was read.</Empty>
           )}
         </Section>
         <Section n={sectionNumber("organisms")} id="organisms" title="Organisms" icon={<Microscope className="size-4" />}>
-          <LinkList items={report.scan.organisms} empty="No bacteria, viruses, or binomial names from the watch list were found." />
+          <LinkList items={report.scan.organisms} empty="No species, strains, cell lines, or viruses were identified in the text that was read." />
         </Section>
         <Section n={sectionNumber("materials")} id="materials" title="Materials" icon={<Layers className="size-4" />}>
-          <LinkList items={report.scan.materials} empty="No composites, resins, or construction materials from the watch list were found." />
+          <LinkList items={report.scan.materials} empty="No composites, resins, alloys, or other construction materials were identified in the text that was read." />
         </Section>
         <Section n={sectionNumber("citations")} id="citations" title="Cited patents" icon={<Link2 className="size-4" />}>
           {record && record.citations.length > 0 ? (

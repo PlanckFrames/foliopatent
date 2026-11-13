@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { parseGooglePatent } from "./parse-google";
 import { fetchSerpRecord } from "./serp";
-import { firstSentences, displayClaimNumber, normalizePublicationId, plainClaimBullets, publicationCandidates } from "./text";
+import { firstSentences, displayClaimNumber, normalizePublicationId, plainClaimBullets, publicationCandidates, samePassage } from "./text";
 import type { Brief, ClaimNote, LookupInput, OfficialRecord } from "./types";
 
 const pageCache = new Map<string, { at: number; html: string }>();
@@ -241,7 +241,7 @@ function tooClose(bullet: string, claim: string): boolean {
 
 function extractiveBrief(input: BriefInput): Brief {
   const abstractSummary = firstSentences(input.abstract, 5);
-  const backgroundSummary = firstSentences(input.background, 5);
+  const backgroundSummary = samePassage(input.background, input.abstract) ? "" : firstSentences(input.background, 5);
   const seed = [input.title ? `${input.title}.` : "", abstractSummary || backgroundSummary].filter(Boolean).join(" ");
   return {
     abstractSummary,
@@ -292,7 +292,7 @@ async function askModel(apiKey: string, data: BriefInput, stricter: boolean): Pr
         {
           role: "system",
           content:
-            "You explain patents to a general reader who is not a lawyer. Write in simple English even when the source is not English. Return only JSON with keys abstractSummary (string, at most 5 sentences, or empty if no abstract was provided), backgroundSummary (string, at most 5 sentences, or empty if no background was provided), patentSummary (string, at most 5 sentences on what the whole patent covers), claimNotes (array of {number, bullets}). Each claim gets 1 to 3 bullets that explain what the claim is about in everyday words. Do not quote the claim. Do not reuse any stretch of five or more source words. Replace legal and technical jargon with plain language; a short name in parentheses is allowed once. Do not invent features that are not in the source. Do not give legal advice.",
+            "You explain patents to a general reader who is not a lawyer. Write in simple English even when the source is not English. Return only JSON with keys abstractSummary (string, at most 5 sentences, or empty if no abstract was provided), backgroundSummary (string, at most 5 sentences, or empty if no background was provided), patentSummary (string, at most 5 sentences on what the whole patent covers), claimNotes (array of {number, bullets}). If the background says (none), backgroundSummary must be an empty string. Never copy the abstract into the background. Each claim gets 1 to 3 bullets that explain what the claim is about in everyday words. Do not quote the claim. Do not reuse any stretch of five or more source words. Replace legal and technical jargon with plain language; a short name in parentheses is allowed once. Do not invent features that are not in the source. Do not give legal advice.",
         },
         {
           role: "user",
@@ -361,7 +361,9 @@ export const explainPatent = createServerFn({ method: "POST" })
       }
       const brief: Brief = {
         abstractSummary: String(parsed.abstractSummary ?? "").replace(/\s+/g, " ").trim().slice(0, 1400),
-        backgroundSummary: String(parsed.backgroundSummary ?? "").replace(/\s+/g, " ").trim().slice(0, 1400),
+        backgroundSummary: samePassage(String(parsed.backgroundSummary ?? ""), data.abstract)
+          ? ""
+          : String(parsed.backgroundSummary ?? "").replace(/\s+/g, " ").trim().slice(0, 1400),
         patentSummary: String(parsed.patentSummary || fallback.patentSummary).replace(/\s+/g, " ").trim().slice(0, 1400),
         claimNotes: notes,
         source: parsed.abstractSummary || parsed.backgroundSummary || parsed.patentSummary ? "brief" : "extract",
@@ -578,7 +580,7 @@ export const readPatentPages = createServerFn({ method: "POST" })
     const examples = data.pages.some((page) => page.example);
     const body = data.pages.map((page) => `--- page ${page.page}${page.example ? " (experimental example)" : ""} ---\n${page.text}`).join("\n\n");
     const lists = `Return {"pages":${english ? "[]" : '[{"page":1,"english":""}]'},"chemicals":[{"name":"","formula":"","cas":"","note":""}],"organisms":[{"name":"","note":""}],"materials":[{"name":"","note":""}],"technologies":[{"name":"","note":""}]}.
-A chemical is a named substance, drug, reagent, solvent, catalyst, polymer, salt, or element, including every compound prepared or tested in an example. An organism is a species, strain, cell line, or virus. A material is a named composite, alloy, resin, ceramic, fibre, or construction material. A technology is a named method, instrument, assay, or process used in the work, such as HPLC, NMR, lyophilization, or spray drying. In an experimental or example section, list every one of these, not a sample. Skip vague words such as solution, compound, or cells. formula and cas stay empty unless printed. note is "example" when the name comes from an example, otherwise the page number.`;
+A chemical is any named substance, drug, reagent, solvent, catalyst, polymer, salt, peptide, or element printed in the text, not only well-known ones, including every compound prepared or tested in an example. An organism is any species, strain, cell line, or virus, including binomial names that are not household species. A material is a named composite, alloy, resin, ceramic, fibre, or construction material. A technology is a named method, instrument, assay, or process used in the work, such as HPLC, NMR, lyophilization, or spray drying. In an experimental or example section, list every one of these, not a sample. Skip vague words such as solution, compound, or cells. formula and cas stay empty unless printed. note is "example" when the name comes from an example, otherwise the page number.`;
     const parsed = await askJson(
       apiKey,
       english

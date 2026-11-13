@@ -183,6 +183,30 @@ export function readingChunksFromExcerpt(excerpt: string): { pages: ReadingPage[
   return { pages: [...head, ...examples], examplesTruncated };
 }
 
+export function samePassage(left: string, right: string): boolean {
+  const a = passageKey(left);
+  const b = passageKey(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shorter = a.length < b.length ? a : b;
+  const longer = a.length < b.length ? b : a;
+  if (longer.includes(shorter) && shorter.length / longer.length > 0.62) return true;
+  const leftWords = passageWords(a);
+  const rightWords = passageWords(b);
+  if (leftWords.length < 12 || rightWords.length < 12) return false;
+  const leftSet = new Set(leftWords);
+  const shared = rightWords.filter((word) => leftSet.has(word)).length;
+  return shared / rightWords.length > 0.78 && shared / leftWords.length > 0.78;
+}
+
+function passageKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function passageWords(value: string): string[] {
+  return value.split(" ").filter((word) => word.length > 3);
+}
+
 export function displayClaimNumber(value: string): string {
   const trimmed = value.trim();
   if (/^\d+$/.test(trimmed)) {

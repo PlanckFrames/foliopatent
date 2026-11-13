@@ -75,52 +75,29 @@ const ORGANISMS: Term[] = [
 ];
 
 const EPITHET_STOP = new Set([
-  "responsible",
-  "method",
-  "process",
-  "which",
-  "wherein",
-  "comprising",
-  "sequence",
-  "nucleic",
-  "acid",
-  "using",
-  "from",
-  "with",
-  "that",
-  "this",
-  "into",
-  "such",
-  "under",
-  "after",
-  "before",
-  "between",
-  "within",
-  "without",
-  "during",
-  "about",
-  "their",
-  "there",
-  "these",
-  "those",
-  "other",
-  "first",
-  "second",
-  "having",
-  "being",
-  "including",
-  "according",
-  "following",
-  "present",
-  "invention",
-  "polymerase",
-  "virus",
-  "bacteria",
-  "species",
-  "strain",
+  "responsible", "method", "process", "which", "wherein", "comprising", "sequence", "nucleic", "acid", "using", "from",
+  "with", "that", "this", "into", "such", "under", "after", "before", "between", "within", "without", "during", "about",
+  "their", "there", "these", "those", "other", "first", "second", "having", "being", "including", "according", "following",
+  "present", "invention", "polymerase", "virus", "bacteria", "species", "strain", "basis", "crisis", "thesis", "analysis",
+  "synthesis", "previous", "various", "numerous", "obvious", "aqueous", "organic", "formula", "plasma", "media", "data",
+  "extra", "alpha", "beta", "gamma", "delta", "supra", "infra", "via", "above", "below", "group", "groups", "form",
+  "forms", "type", "dose", "range", "level", "blood", "cells", "peptide", "protein", "hormone", "agent", "salt", "ester",
+  "treatment", "composition", "compound", "device", "system", "example", "figure", "table", "claim", "step", "shown",
+  "described", "disclosed", "provided", "obtained", "prepared", "preferred", "suitable", "available", "particular",
 ]);
 
-const GENERA = new Set(ORGANISMS.map((item) => item.name.split(" ")[0]).filter((word) => /^[A-Z][a-z]+$/.test(word)));
+const GENUS_STOP = new Set([
+  "the", "this", "that", "these", "those", "said", "such", "each", "both", "when", "where", "after", "before", "during",
+  "using", "having", "being", "other", "from", "with", "into", "over", "under", "about", "between", "within", "without",
+  "against", "among", "patent", "claim", "example", "figure", "table", "step", "method", "process", "composition",
+  "compound", "invention", "present", "following", "above", "below", "further", "first", "second", "third", "amino",
+  "acid", "fatty", "nucleic", "human", "mouse", "type", "group", "form", "dose", "range", "level", "blood", "cell",
+  "virus", "peptide", "protein", "hormone", "agent", "salt", "ester", "base", "metal", "water", "buffer", "solution",
+  "mixture", "material", "polymer", "solvent", "reagent", "substance", "device", "system", "apparatus", "injection",
+  "treatment", "diabetes", "obesity", "glucose", "insulin", "according", "wherein", "comprising", "including", "preferred",
+  "embodiment", "description", "abstract", "background", "summary", "claimed", "what", "some", "many", "more", "most",
+  "only", "also", "then", "than", "into", "upon", "once", "week", "weekly", "said", "herein", "thereof", "thereby",
+]);
 
 const MATERIALS: Term[] = [
   { name: "epoxy resin", wiki: "Epoxy" },
@@ -190,11 +167,132 @@ function linkFor(name: string, wiki: string, note = ""): NamedLink {
   return { name, href: wikiUrl(wiki), note };
 }
 
+const CHEMICAL_CLASS =
+  "(?:acid|oxide|dioxide|chloride|hydrochloride|sulfate|sulphate|phosphate|carbonate|hydroxide|nitrate|acetate|bromide|iodide|fluoride|ether|ester|amide|amine|ketone|alcohol|anhydride|hydrate|hydrobromide|mesylate|citrate|tartrate|maleate|fumarate|succinate|sulfonate|sulphonate|glycol)";
+const CHEMICAL_NAME = new RegExp(
+  `\\b([A-Za-z][a-z]{2,}(?:[- ](?:[A-Za-z][a-z]{2,}|[0-9]+)){0,4}[- ]${CHEMICAL_CLASS})\\b`,
+  "gi",
+);
+const DRUG_STEM =
+  /\b([A-Za-z][a-z]{2,}(?:olol|sartan|vastatin|statin|cillin|mycin|cycline|prazole|dipine|azepam|oxetine|gliptin|flozin|lukast|profen|navir|ciclib|tinib|setron|conazole|thiazide|fibrate|barbital|caine|tidine|afil|mustine|rubicin|taxel|platin|glutide|natide|paratide|zenatide))\b/g;
+const NAMED_CODE = /\b([A-Za-z][a-z]{4,}-\d{1,4})\b/g;
+const FORMULA = /\b((?:[A-Z][a-z]?\d{0,3}){2,10})\b/g;
+const GENERIC_CHEMICAL = new Set([
+  "amino acid", "nucleic acid", "fatty acid", "organic acid", "inorganic acid", "the acid", "said acid", "an acid",
+  "the oxide", "the salt", "said salt", "the ester", "the amide", "the amine", "the alcohol", "the ether",
+]);
+const CHEMICAL_HEAD_STOP = new Set([
+  "the", "said", "such", "this", "that", "any", "each", "organic", "inorganic", "fatty", "amino", "nucleic", "dilute",
+  "concentrated", "aqueous", "strong", "weak", "suitable", "preferred", "corresponding", "respective", "optional",
+]);
+const CODE_STOP = new Set(["figure", "table", "example", "claim", "step", "page", "formula", "scheme", "chart", "item", "group", "type", "seq"]);
+
+function parseChemicals(text: string): { name: string; formula: string; cas: string; note: string }[] {
+  const found: { name: string; formula: string; cas: string; note: string }[] = [];
+  const seen = new Set<string>();
+  const add = (name: string, formula = "", cas = "", note = "Named in the text") => {
+    const clean = trimChemicalName(name);
+    const key = clean.toLowerCase();
+    if (clean.length < 3 || seen.has(key) || GENERIC_CHEMICAL.has(key) || VAGUE.has(key)) return;
+    if (CHEMICAL_HEAD_STOP.has(key.split(/[\s-]/)[0] ?? "")) return;
+    seen.add(key);
+    found.push({ name: clean, formula, cas, note });
+  };
+  for (const match of text.matchAll(/\b(\d{2,7}-\d{2}-\d)\b/g)) {
+    const cas = match[1] ?? "";
+    if (!casChecksum(cas)) continue;
+    add(`CAS ${cas}`, "", cas, "CAS number in the text");
+  }
+  for (const match of text.matchAll(CHEMICAL_NAME)) add(match[1] ?? "");
+  for (const match of text.matchAll(DRUG_STEM)) add(match[1] ?? "");
+  for (const match of text.matchAll(NAMED_CODE)) {
+    const name = match[1] ?? "";
+    if (CODE_STOP.has(name.split("-")[0]?.toLowerCase() ?? "")) continue;
+    add(name);
+  }
+  for (const smiles of explicitSmiles(text)) add(`SMILES ${smiles}`, "", "", "SMILES string in the text");
+  for (const match of text.matchAll(FORMULA)) {
+    const formula = match[1] ?? "";
+    if (!/\d/.test(formula) || formula.length > 24 || /^[A-Z]\d{4,}$/.test(formula)) continue;
+    add(formula, formula, "", "Formula in the text");
+  }
+  return found;
+}
+
+function trimChemicalName(name: string): string {
+  const stop = new Set([...CHEMICAL_HEAD_STOP, "and", "or", "of", "for", "with", "from"]);
+  const parts = name.replace(/\s+/g, " ").trim().split(" ");
+  while (parts.length > 1 && stop.has((parts[0] ?? "").toLowerCase())) parts.shift();
+  return parts.join(" ");
+}
+
+function casChecksum(cas: string): boolean {
+  const digits = cas.replace(/-/g, "");
+  if (!/^\d{5,10}$/.test(digits)) return false;
+  const check = Number(digits.slice(-1));
+  const body = digits.slice(0, -1).split("").reverse();
+  const sum = body.reduce((total, digit, index) => total + Number(digit) * (index + 1), 0);
+  return sum % 10 === check;
+}
+
+const LATIN_EPITHET = /^(?:[a-z]{4,}(?:ensis|oides|icola|iana|ianus|icus|ica|orum|arum|ens)|[a-z]{3,}(?:ii|iae|ae|us|um|is|i))$/;
+const CELL_LINE = /\b(HeLa|HEK-?293|CHO-K1|CHO|Vero|Jurkat|MCF-7|A549|NIH\/3T3|SP2\/0)\b/g;
+const VIRUS_NAME = /\b([A-Z][A-Za-z0-9-]+(?:\s+[A-Za-z0-9-]+){0,3}\s+virus)\b/g;
+
+function parseOrganisms(text: string): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  const add = (name: string) => {
+    const clean = name.replace(/\s+/g, " ").trim();
+    const key = clean.toLowerCase();
+    if (clean.length < 5 || seen.has(key)) return;
+    seen.add(key);
+    names.push(clean);
+  };
+  for (const match of text.matchAll(/\b([A-Z][a-z]{2,})\s+([a-z]{3,})\b/g)) {
+    const genus = match[1] ?? "";
+    const species = match[2] ?? "";
+    if (GENUS_STOP.has(genus.toLowerCase()) || EPITHET_STOP.has(species) || !LATIN_EPITHET.test(species)) continue;
+    add(`${genus} ${species}`);
+  }
+  for (const match of text.matchAll(/\b([A-Z])\.\s*([a-z]{3,})\b/g)) {
+    const species = match[2] ?? "";
+    if (EPITHET_STOP.has(species) || !LATIN_EPITHET.test(species)) continue;
+    add(`${match[1]}. ${species}`);
+  }
+  for (const match of text.matchAll(VIRUS_NAME)) {
+    const name = match[1] ?? "";
+    if (GENUS_STOP.has(name.split(" ")[0]?.toLowerCase() ?? "")) continue;
+    add(name);
+  }
+  for (const match of text.matchAll(CELL_LINE)) add(match[1] ?? "");
+  for (const match of text.matchAll(/\b(ATCC\s*(?:No\.?\s*)?[A-Z]{0,5}\s*\d{3,8})\b/gi)) add((match[1] ?? "").replace(/\s+/g, " "));
+  return names;
+}
+
+const MATERIAL_NAME =
+  /\b((?:carbon|glass|stainless|portland|epoxy)\s+)?((?:epoxy(?:\s+resin)?|polyurethane|polycarbonate|polyethylene|polypropylene|polystyrene|polyester|polyamide|polyimide|silicone(?:\s+rubber)?|aramid|fiberglass|graphene|ceramic|plywood|gypsum|kevlar|steel|alloy|cement|resin|fiber|fibre))\b/gi;
+
+function parseMaterials(text: string): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(MATERIAL_NAME)) {
+    const prefix = (match[1] ?? "").trim();
+    const core = (match[2] ?? "").trim();
+    const name = `${prefix} ${core}`.replace(/\s+/g, " ").trim();
+    const key = name.toLowerCase();
+    if (name.length < 4 || seen.has(key) || key === prefix.toLowerCase()) continue;
+    if (!prefix && /^(?:resin|fiber|fibre|alloy)$/i.test(core)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  return names;
+}
+
 function chemicalLinks(item: Chemical): ChemicalHit["links"] {
   const links = [
     { label: "Wikipedia", href: wikiUrl(item.wiki) },
     { label: "PubChem", href: `https://pubchem.ncbi.nlm.nih.gov/#query=${encodeURIComponent(item.name)}` },
-    { label: "ChemSpider", href: chemspiderUrl(item.cas || item.name) },
   ];
   if (item.cas) links.push({ label: "CAS", href: `https://commonchemistry.cas.org/detail?cas_rn=${item.cas}` });
   return links;
@@ -213,71 +311,64 @@ function uniqueStrings(values: string[]): string[] {
 export function scanText(text: string, extras?: { classifications?: { code: string; description: string }[]; keywords?: string[] }): Scan {
   const chemicals: ChemicalHit[] = [];
   const seenChem = new Set<string>();
-  for (const item of CHEMICALS) {
-    if (!mentioned(text, item.name)) continue;
-    const key = item.wiki.toLowerCase();
-    if (seenChem.has(key)) continue;
+  const addChemical = (hit: ChemicalHit) => {
+    const key = hit.cas ? `cas:${hit.cas}` : `name:${hit.name.toLowerCase()}`;
+    if (seenChem.has(key)) return;
     seenChem.add(key);
-    chemicals.push({
-      name: item.name,
-      formula: item.formula ?? "",
-      smiles: item.smiles ?? "",
-      cas: item.cas ?? "",
-      links: chemicalLinks(item),
-    });
-  }
-
-  for (const cas of uniqueStrings([...text.matchAll(/\b(\d{2,7}-\d{2}-\d)\b/g)].map((match) => match[1] ?? ""))) {
-    if (chemicals.some((item) => item.cas === cas)) continue;
-    chemicals.push({
-      name: `CAS ${cas}`,
-      formula: "",
-      smiles: "",
-      cas,
-      links: [
-        { label: "CAS", href: `https://commonchemistry.cas.org/detail?cas_rn=${cas}` },
-        { label: "PubChem", href: `https://pubchem.ncbi.nlm.nih.gov/#query=${encodeURIComponent(cas)}` },
-      ],
-    });
-  }
-
-  const labeledSmiles = explicitSmiles(text);
-  if (labeledSmiles.length > 0 && chemicals.length === 0) {
-    for (const smiles of labeledSmiles.slice(0, 6)) {
-      chemicals.push({
-        name: "SMILES string in the text",
-        formula: "",
-        smiles,
-        cas: "",
-        links: [{ label: "PubChem", href: `https://pubchem.ncbi.nlm.nih.gov/#query=${encodeURIComponent(smiles)}` }],
+    chemicals.push(hit);
+  };
+  for (const found of parseChemicals(text)) {
+    const known = CHEMICALS.find((item) => item.name.toLowerCase() === found.name.toLowerCase() || (found.cas && item.cas === found.cas));
+    if (known) {
+      addChemical({
+        name: known.name,
+        formula: known.formula ?? found.formula,
+        smiles: known.smiles ?? "",
+        cas: known.cas ?? found.cas,
+        links: chemicalLinks(known),
+        note: found.note,
       });
+      continue;
     }
-  } else if (labeledSmiles.length > 0) {
-    chemicals[0] = { ...chemicals[0], smiles: chemicals[0].smiles || labeledSmiles[0] };
+    addChemical({
+      name: found.name,
+      formula: found.formula,
+      smiles: "",
+      cas: found.cas,
+      links: looseChemicalLinks(found.name, found.cas),
+      note: found.note,
+    });
   }
 
   const organisms: NamedLink[] = [];
   const seenOrg = new Set<string>();
+  const addOrganism = (name: string, href: string, note: string) => {
+    const key = name.toLowerCase();
+    if (seenOrg.has(key)) return;
+    seenOrg.add(key);
+    organisms.push({ name, href, note });
+  };
   for (const item of ORGANISMS) {
     if (!mentioned(text, item.name, item.acronym)) continue;
-    const key = item.wiki.toLowerCase();
-    if (seenOrg.has(key)) continue;
-    seenOrg.add(key);
-    organisms.push(linkFor(item.name, item.wiki, "Named in the text"));
+    addOrganism(item.name, wikiUrl(item.wiki), "Named in the text");
   }
-  for (const match of text.matchAll(/\b([A-Z][a-z]{3,})\s+([a-z]{4,})\b/g)) {
-    const genus = match[1] ?? "";
-    const species = match[2] ?? "";
-    if (!GENERA.has(genus) || EPITHET_STOP.has(species)) continue;
-    const name = `${genus} ${species}`;
-    if (seenOrg.has(name.toLowerCase())) continue;
-    seenOrg.add(name.toLowerCase());
-    organisms.push({ name, href: wikiSearch(name), note: "Binomial in the text" });
-  }
+  for (const name of parseOrganisms(text)) addOrganism(name, wikiSearch(name), "Named in the text");
 
-  const materials = MATERIALS.filter((item) => mentioned(text, item.name)).map((item) =>
-    linkFor(item.name, item.wiki, "Named in the text"),
-  );
+  const materials: NamedLink[] = [];
+  const seenMaterial = new Set<string>();
+  const addMaterial = (name: string, href: string, note: string) => {
+    const key = name.toLowerCase();
+    if (seenMaterial.has(key) || VAGUE.has(key)) return;
+    seenMaterial.add(key);
+    materials.push({ name, href, note });
+  };
+  for (const item of MATERIALS) {
+    if (mentioned(text, item.name)) addMaterial(item.name, wikiUrl(item.wiki), "Named in the text");
+  }
+  for (const name of parseMaterials(text)) {
+    const known = MATERIALS.find((item) => item.name.toLowerCase() === name.toLowerCase());
+    addMaterial(name, known ? wikiUrl(known.wiki) : wikiSearch(name), "Named in the text");
+  }
 
   const technologies: NamedLink[] = [];
   const seenTech = new Set<string>();
@@ -302,11 +393,14 @@ export function scanText(text: string, extras?: { classifications?: { code: stri
     });
   }
 
+  const listedMaterials = materials.filter(
+    (item) => !chemicals.some((chemical) => chemical.name.toLowerCase().startsWith(`${item.name.toLowerCase()} `)),
+  );
   return {
-    technologies: technologies.slice(0, 12),
-    chemicals: chemicals.slice(0, 16),
-    organisms: organisms.slice(0, 12),
-    materials: materials.slice(0, 12),
+    technologies: technologies.slice(0, 24),
+    chemicals: chemicals.slice(0, 80),
+    organisms: organisms.slice(0, 40),
+    materials: listedMaterials.slice(0, 40),
   };
 }
 
@@ -520,17 +614,11 @@ function joinNote(left?: string, right?: string): string {
   return [...new Set(parts)].join(" · ").slice(0, 160);
 }
 
-function chemspiderUrl(query: string): string {
-  const term = query.replace(/^CAS\s+/i, "").trim();
-  return `https://www.chemspider.com/search?q=${encodeURIComponent(term)}`;
-}
-
 function looseChemicalLinks(name: string, cas: string): ChemicalHit["links"] {
   const query = cas || name;
   const links = [
     { label: "Wikipedia", href: wikiSearch(name) },
     { label: "PubChem", href: `https://pubchem.ncbi.nlm.nih.gov/#query=${encodeURIComponent(query)}` },
-    { label: "ChemSpider", href: chemspiderUrl(cas || name) },
   ];
   if (cas) links.push({ label: "CAS", href: `https://commonchemistry.cas.org/detail?cas_rn=${cas}` });
   return links;
