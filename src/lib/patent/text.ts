@@ -71,8 +71,22 @@ export function officeFromId(id: string): { code: string; name: string } {
   return { code, name: names[code] ?? code };
 }
 
+export function foreignLetters(text: string): number {
+  return text.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0600-\u06ff\u0590-\u05ff\u0e00-\u0e7f\u0400-\u04ff\u0370-\u03ff]/g)?.length ?? 0;
+}
+
 export function patentUrl(id: string): string {
-  return `https://patents.google.com/patent/${encodeURIComponent(id)}/en`;
+  return `https://patents.google.com/patent/${encodeURIComponent(id.replace(/\s+/g, ""))}/en`;
+}
+
+export function documentHref(value: string): string {
+  const clean = value.trim();
+  const compact = clean.replace(/\s+/g, "");
+  const publication = compact.match(/^([A-Z]{2}\d{5,})([A-Z]\d?)$/i);
+  if (publication?.[1] && publication[2]) return patentUrl(`${publication[1]}${publication[2]}`.toUpperCase());
+  const application = compact.match(/^([A-Z]{2})(\d{6,})\.\d+([A-Z]\d?)?$/i);
+  if (application?.[1] && application[2]) return patentUrl(`${application[1]}${application[2]}${application[3] ?? ""}`.toUpperCase());
+  return `https://patents.google.com/?q=${encodeURIComponent(clean)}`;
 }
 
 export function wikiUrl(title: string): string {

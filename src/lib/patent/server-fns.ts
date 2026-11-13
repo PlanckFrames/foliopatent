@@ -655,9 +655,8 @@ english must be the full translation of that page, with every sentence of any ex
   });
 
 function mostlyForeign(text: string): boolean {
-  const foreign = text.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g)?.length ?? 0;
-  const latin = text.match(/[A-Za-z]/g)?.length ?? 0;
-  return foreign > 8 && foreign > latin * 0.35;
+  const foreign = text.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0600-\u06ff\u0400-\u04ff]/g)?.length ?? 0;
+  return foreign >= 8;
 }
 
 function plainPoints(value: unknown, sources: string[]): string[] {
@@ -667,7 +666,7 @@ function plainPoints(value: unknown, sources: string[]): string[] {
     const text = String(item ?? "").replace(/\s+/g, " ").trim();
     if (text.length < 18 || text.length > 240 || mostlyForeign(text)) continue;
     if (/^(states what this claim protects|covers a mixture|covers a way of doing|covers a device|covers a use|adds a further requirement|the present invention)/i.test(text)) continue;
-    if (sources.some((source) => source && copiesSource(text, source))) continue;
+    if (sources.some((source) => source && copiesSource(text, source) && text.split(" ").length > 22)) continue;
     const sentence = text.endsWith(".") ? text : `${text}.`;
     if (points.some((point) => point.toLowerCase() === sentence.toLowerCase())) continue;
     points.push(sentence);
@@ -714,8 +713,8 @@ export const translateOverview = createServerFn({ method: "POST" })
     const ask = (stricter: boolean) =>
       askJson(
         apiKey,
-        "You translate patents into clear English and then explain them in short bullets. Return only JSON. Do not invent facts.",
-        `${stricter ? "The previous bullets copied the source. Write new short sentences.\n" : ""}Source language: ${data.languageLabel}
+        "You translate patents into clear English and then explain them in short bullets. Return only JSON. Every value you return must be English. Do not copy Chinese, Japanese, Korean, or any other source script into the answer. Do not invent facts.",
+        `${stricter ? "The previous answer was not English, or the bullets copied the source. Write the translation and the bullets in English.\n" : ""}Source language: ${data.languageLabel}
 Title: ${data.title || "(none)"}
 
 Abstract:
@@ -725,8 +724,8 @@ Background:
 ${data.background || "(none)"}
 
 Return {"title":"","abstract":"","background":"","bullets":[]}.
-title, abstract, and background must be complete English translations, not summaries. If a field was empty, return an empty string. If the field is already clear English, copy it. If it is broken or OCR English, repair the wording without adding facts.
-bullets: 4 to 7 sentences for a general reader, each under 28 words, summarizing the translated abstract and background. Do not quote the source. Do not start a bullet with "The present invention". If there is no background, summarize the abstract only.`,
+title, abstract, and background must be complete English translations, not summaries. If a field was empty, return an empty string. If the field is already clear English, repair only broken spacing and copy the meaning. If it is not English, translate every sentence. Never leave source-language characters in the output.
+bullets: 4 to 7 English sentences for a general reader, each under 28 words, summarizing the translated abstract and background. Do not quote the source. Do not start a bullet with "The present invention". If there is no background, summarize the abstract only.`,
         4500,
       );
     const parsed = (await ask(false)) ?? (await ask(true));
@@ -771,19 +770,23 @@ export const translateClaims = createServerFn({ method: "POST" })
     })),
   }))
   .handler(async ({ data }): Promise<{ claims: ClaimEnglish[] }> => {
-    const original = data.claims.map((claim) => ({ number: displayClaimNumber(claim.number), english: claim.text, bullets: [] as string[] }));
+    const original = data.claims.map((claim) => ({
+      number: displayClaimNumber(claim.number),
+      english: mostlyForeign(claim.text) ? "" : claim.text,
+      bullets: [] as string[],
+    }));
     const apiKey = process.env.XAI_API_KEY;
     if (!apiKey || data.claims.length === 0) return { claims: original };
     const ask = (stricter: boolean) =>
       askJson(
         apiKey,
-        "You translate patent claims into complete English and then explain each one in simple bullets. Return only JSON. Do not invent features.",
-        `${stricter ? "The previous answer was still not clear English, or the bullets quoted the claim. Fix both.\n" : ""}Source language: ${data.languageLabel}
+        "You translate one patent claim into complete English and then explain it. Return only JSON. The english field and every bullet must be English words. Do not copy the source language. Do not invent features.",
+        `${stricter ? "The previous answer was still in the source language or the bullets were missing. Translate the claim into English and add the bullets.\n" : ""}Source language: ${data.languageLabel}
 
 ${data.claims.map((claim) => `Claim ${displayClaimNumber(claim.number)}:\n${claim.text}`).join("\n\n")}
 
 Return {"claims":[{"number":"1","english":"","bullets":["",""]}]}.
-english is the full translation of that claim, with every clause kept. If the claim is already clear English, copy it. If it is broken English, repair it without adding facts. bullets are 1 to 3 new sentences under 28 words for a non-expert. Do not quote the claim in any language. Never write "States what this claim protects" or "Adds a further requirement".`,
+english is the full English translation, with every clause kept. Do not include characters from the source script. bullets are 2 or 3 new English sentences under 28 words for a non-expert. Do not quote the claim. Never write "States what this claim protects" or "Adds a further requirement".`,
         3200,
       );
     const take = (parsed: Record<string, unknown> | null): ClaimEnglish[] => {
@@ -792,10 +795,11 @@ english is the full translation of that claim, with every clause kept. If the cl
         const wanted = displayClaimNumber(claim.number || String(index + 1));
         const match =
           rows.find((item) => displayClaimNumber(String((item as { number?: unknown }).number ?? "")) === wanted) ?? rows[index];
-        const row = (match ?? {}) as { english?: unknown; text?: unknown; bullets?: unknown };
-        const english = asText(row.english || row.text, 4000);
-        const accepted = english && !mostlyForeign(english) ? english : mostlyForeign(claim.text) ? "" : claim.text;
-        return { number: wanted, english: accepted, bullets: plainPoints(row.bullets, [claim.text, accepted]) };
+        const row = (match ?? {}) as { english?: unknown; bullets?: unknown };
+        const english = asText(row.english, 4000);
+        const accepted = english && !mostlyForeign(english) ? english : "";
+        const bullets = plainPoints(row.bullets, [accepted]).filter((item) => !mostlyForeign(item));
+        return { number: wanted, english: accepted, bullets: bullets.length > 0 ? bullets : loosePoints(row.bullets).filter((item) => !mostlyForeign(item)) };
       });
     };
     let claims = take(await ask(false));

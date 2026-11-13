@@ -17,7 +17,7 @@ import {
 import { describeClasses, lookupPatent, readPatentPages, translateClaims, translateOverview } from "@/lib/patent/server-fns";
 import { biblioFromPdf, collectNumbers, collectParties, extractPdfText, findPublicationId, inventorColumns, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
 import { absorbFindings, detectLanguage, scanText, type PageFinding } from "@/lib/patent/scan";
-import { displayClaimNumber, filingPlace, grokUrl, patentUrl, readingChunksFromExcerpt, samePassage, selectReadingPages, wikiSearch, type ReadingPage } from "@/lib/patent/text";
+import { displayClaimNumber, documentHref, filingPlace, foreignLetters, grokUrl, patentUrl, readingChunksFromExcerpt, samePassage, selectReadingPages, wikiSearch, type ReadingPage } from "@/lib/patent/text";
 import type { Brief, OfficialRecord, PatentNumber, Scan } from "@/lib/patent/types";
 
 const SAMPLES = [
@@ -61,6 +61,15 @@ const FEATURES = [
 ];
 
 const USELESS_SUMMARY = /^(states what this claim protects|covers a mixture or formulation|covers a way of doing something|covers a device|covers a use of the invention|adds a further requirement)/i;
+
+function stillForeign(text: string): boolean {
+  return foreignLetters(text) >= 8;
+}
+
+function preferOriginal(...choices: string[]): string {
+  const texts = choices.map((item) => item.replace(/\s+/g, " ").trim()).filter(Boolean);
+  return texts.find((item) => foreignLetters(item) >= 8) || texts[0] || "";
+}
 
 function fieldNeedsTranslation(text: string): boolean {
   const sample = text.replace(/\s+/g, " ").trim();
@@ -196,12 +205,18 @@ export function FolioApp() {
 
       const pdfBiblio = pdfText ? biblioFromPdf(pdfText) : { abstract: "", background: "", claims: [] };
       const excerptBiblio = record?.excerpt ? biblioFromPdf(record.excerpt) : { abstract: "", background: "", claims: [] };
-      const abstract = record?.abstract || pdfBiblio.abstract || excerptBiblio.abstract;
-      const backgroundSource = pdfBiblio.background || excerptBiblio.background;
+      const abstract = preferOriginal(pdfBiblio.abstract, excerptBiblio.abstract, record?.abstract ?? "");
+      const backgroundSource = preferOriginal(pdfBiblio.background, excerptBiblio.background, "");
       const background = samePassage(abstract, backgroundSource) ? "" : backgroundSource;
-      const sourceTitle = record?.title || titleFromPdf(pdfText) || fileLabel || "Uploaded patent";
-      const sourceClaims =
-        record && record.claims.length > 0
+      const sourceTitle = preferOriginal(titleFromPdf(pdfText), record?.title ?? "", fileLabel || "Uploaded patent");
+      const pdfClaimsForeign = pdfBiblio.claims.some((claim) => foreignLetters(claim.text) >= 12);
+      const sourceClaims = pdfClaimsForeign
+        ? pdfBiblio.claims.map((claim, index) => ({
+            number: displayClaimNumber(claim.number || String(index + 1)),
+            text: claim.text,
+            independent: true,
+          }))
+        : record && record.claims.length > 0
           ? record.claims.map((claim) => ({
               number: displayClaimNumber(claim.number),
               text: claim.text,
@@ -245,30 +260,25 @@ export function FolioApp() {
           data: { title: sourceTitle, abstract, background, languageLabel: frontLanguage.label },
         });
         if (!liveTabs.current.has(tabId)) return;
-        if (overview.title) displayTitle = overview.title;
-        if (overview.abstract) displayAbstract = overview.abstract;
-        if (overview.background) displayBackground = overview.background;
+        if (overview.title && !stillForeign(overview.title)) displayTitle = overview.title;
+        if (overview.abstract && !stillForeign(overview.abstract)) displayAbstract = overview.abstract;
+        if (overview.background && !stillForeign(overview.background)) displayBackground = overview.background;
         plainPoints = overview.bullets;
         frontTranslated = displayTitle !== sourceTitle || displayAbstract !== abstract || displayBackground !== background || plainPoints.length > 0;
       }
-      for (let index = 0; index < sourceClaims.length; index += 2) {
+      for (const claim of sourceClaims) {
         if (!liveTabs.current.has(tabId)) return;
-        const group = sourceClaims.slice(index, index + 2);
-        const last = group[group.length - 1]?.number ?? "";
-        patchTab(tabId, { status: group.length === 1 ? `Translating claim ${group[0]?.number}…` : `Translating claims ${group[0]?.number}–${last}…` });
+        patchTab(tabId, { status: `Translating claim ${claim.number}…` });
         const part = await translateClaims({
-          data: {
-            languageLabel: frontLanguage.label,
-            claims: group.map((claim) => ({ number: claim.number, text: claim.text })),
-          },
+          data: { languageLabel: frontLanguage.label, claims: [{ number: claim.number, text: claim.text }] },
         });
         if (!liveTabs.current.has(tabId)) return;
-        writtenClaims = writtenClaims.map((claim) => {
-          const next = part.claims.find((item) => displayClaimNumber(item.number) === claim.number);
-          if (!next?.english) return claim;
-          frontTranslated = true;
-          return { ...claim, text: next.english, notes: next.bullets };
-        });
+        const next = part.claims.find((item) => displayClaimNumber(item.number) === claim.number) ?? part.claims[0];
+        if (!next?.english || stillForeign(next.english)) continue;
+        frontTranslated = true;
+        writtenClaims = writtenClaims.map((item) =>
+          item.number === claim.number && item.original === claim.text ? { ...item, text: next.english, notes: next.bullets } : item,
+        );
       }
       const missing = writtenClaims.filter((claim) => claim.original && !claim.text && fieldNeedsTranslation(claim.original));
       for (const claim of missing) {
@@ -278,7 +288,7 @@ export function FolioApp() {
           data: { languageLabel: frontLanguage.label, claims: [{ number: claim.number, text: claim.original }] },
         });
         const next = part.claims[0];
-        if (!next?.english) continue;
+        if (!next?.english || stillForeign(next.english)) continue;
         writtenClaims = writtenClaims.map((item) => (item.number === claim.number ? { ...item, text: next.english, notes: next.bullets } : item));
       }
       writtenClaims = writtenClaims.map((claim) => (claim.text || fieldNeedsTranslation(claim.original) ? claim : { ...claim, text: claim.original }));
@@ -620,7 +630,11 @@ function ReportView({ report }: { report: Report }) {
               {report.numbers.map((item) => (
                 <div key={`${item.label}-${item.value}`} className="grid grid-cols-[8.5rem_minmax(0,1fr)] gap-3 border-b border-line py-2 sm:grid-cols-[11rem_minmax(0,1fr)]">
                   <dt className="text-sm text-muted">{item.label}</dt>
-                  <dd className="break-all font-mono text-sm">{item.value}</dd>
+                  <dd className="break-all font-mono text-sm">
+                    <a className="underline decoration-line underline-offset-4" href={documentHref(item.value)} target="_blank" rel="noreferrer">
+                      {item.value}
+                    </a>
+                  </dd>
                 </div>
               ))}
             </dl>

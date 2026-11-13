@@ -1,4 +1,4 @@
-import { normalizePublicationId, displayClaimNumber } from "./text";
+import { normalizePublicationId, displayClaimNumber, foreignLetters } from "./text";
 import { detectScanLanguage } from "./scan";
 import type { OfficialRecord, PatentNumber } from "./types";
 
@@ -508,11 +508,16 @@ export function biblioFromPdf(text: string): PdfBiblio {
   const claims: { number: string; text: string }[] = [];
   const claimRe = /(?:\[(\d{1,5})\]|(?:^|\s)(\d{1,4})\.)\s+(.*?)(?=(?:\s\[\d{1,5}\]|\s\d{1,4}\.)\s|$)/g;
   for (const match of claimZone.matchAll(claimRe)) {
-    const body = (match[3] ?? "").trim();
+    const body = (match[3] ?? "").replace(/\s+/g, " ").trim();
     if (body.length < 30) continue;
+    const previous = claims[claims.length - 1];
+    if (previous && /^(?:[a-z][).、]|[（(][a-z0-9][)）])/i.test(body)) {
+      previous.text = `${previous.text} ${body}`.slice(0, 4000);
+      continue;
+    }
     claims.push({
       number: displayClaimNumber(match[1] || match[2] || String(claims.length + 1)),
-      text: body.slice(0, 2200),
+      text: body.slice(0, 4000),
     });
     if (claims.length >= 40) break;
   }
@@ -524,22 +529,39 @@ export function biblioFromPdf(text: string): PdfBiblio {
 }
 
 function claimZoneFrom(flat: string): string {
-  const markers = [
+  const original = [...flat.matchAll(/权利要求(?!\d)|特許請求の範囲|청구항/g)];
+  const first = original[0];
+  if (first?.index != null) return flat.slice(first.index + first[0].length);
+  const english = [
     ...flat.matchAll(
-      /\b(what is claimed is|patentkrav|revendications|patentanspr[uü]che|reivindicaciones|rivendicazioni|权利要求|特許請求の範囲|청구항)\b/gi,
+      /\b(?:what is claimed is|claims|patentkrav|revendications|patentanspr[uü]che|reivindicaciones|rivendicazioni)\b/gi,
     ),
   ];
-  const claims = markers.length > 0 ? markers : [...flat.matchAll(/\bclaims\b/gi)];
-  const last = claims[claims.length - 1];
+  const last = english[english.length - 1];
   if (!last || last.index == null) return "";
   return flat.slice(last.index + last[0].length);
 }
 
 function pullAbstract(flat: string): string {
-  const match = flat.match(
-    /\b(?:abstract|sammendrag|zusammenfassung|abr[eé]g[eé]|resumen|riassunto|sammanfattning|sammandrag)\b[:\s]{0,8}(.{40,4500}?)(?=\b(?:claims|background|field of the invention|description|technical field|patentkrav|revendications|patentanspr|reivindicaciones|what is claimed)\b)/i,
-  );
-  return (match?.[1] ?? "").replace(/\s+/g, " ").trim();
+  const heads =
+    /摘\s*要|要旨|초록|【\s*摘要\s*】|\b(?:abstract|sammendrag|zusammenfassung|abr[eé]g[eé]|resumen|riassunto|sammanfattning|sammandrag)\b/gi;
+  const marks = [...flat.matchAll(heads)];
+  const found: string[] = [];
+  for (let index = 0; index < marks.length; index += 1) {
+    const head = marks[index];
+    if (!head || head.index == null) continue;
+    const start = head.index + head[0].length;
+    const next = marks[index + 1]?.index ?? flat.length;
+    const window = flat.slice(start, Math.min(next, start + 2200));
+    const stop = window.search(
+      /权利要求|特許請求|청구항|技术领域|背景技术|\b(?:claims|background|field of the invention|technical field|description|patentkrav|revendications|patentanspr|reivindicaciones|what is claimed)\b/i,
+    );
+    const body = (stop > 40 ? window.slice(0, stop) : window).replace(/^[:\s]+/, "").replace(/\s+/g, " ").trim();
+    if (body.length >= 40) found.push(body.slice(0, 3500));
+  }
+  const original = [...found].sort((a, b) => foreignLetters(b) - foreignLetters(a))[0];
+  if (original && foreignLetters(original) >= 20) return original;
+  return found[0] || "";
 }
 
 function pullBackground(flat: string): string {
