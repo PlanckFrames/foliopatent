@@ -1,5 +1,5 @@
 import type { ChemicalHit, Classification, NamedLink, Scan } from "./types";
-import { escapeRegExp, wikiSearch, wikiUrl } from "./text";
+import { escapeRegExp, foreignLetters, wikiSearch, wikiUrl } from "./text";
 
 type Chemical = {
   name: string;
@@ -177,6 +177,8 @@ const DRUG_STEM =
   /\b([A-Za-z][a-z]{2,}(?:olol|sartan|vastatin|statin|cillin|mycin|cycline|prazole|dipine|azepam|oxetine|gliptin|flozin|lukast|profen|navir|ciclib|tinib|setron|conazole|thiazide|fibrate|barbital|caine|tidine|afil|mustine|rubicin|taxel|platin|glutide|natide|paratide|zenatide))\b/g;
 const FRAGMENT_NAME =
   /^(?:methyl|ethyl|propyl|butyl|pentyl|hexyl|heptyl|octyl|phenyl|vinyl|allyl|least|most|between|about|alpha|beta|gamma|carbon|group|component|polymer)-\d+$/i;
+const NOT_A_CHEMICAL =
+  /\b(?:describes|describe|described|include|includes|including|may|alter|altered|insert|inserted|other|having|wherein|comprising|according|claim|device|system|method|which|between|such|using|used|contain|contains|containing|nucleic|amino|fatty)\b/i;
 const GENERIC_CHEMICAL = new Set([
   "amino acid", "nucleic acid", "fatty acid", "organic acid", "inorganic acid", "the acid", "said acid", "an acid",
   "the oxide", "the salt", "said salt", "the ester", "the amide", "the amine", "the alcohol", "the ether",
@@ -192,7 +194,7 @@ function parseChemicals(text: string): { name: string; formula: string; cas: str
   const add = (name: string, formula = "", cas = "", note = "Named in the text") => {
     const clean = trimChemicalName(name);
     const key = clean.toLowerCase();
-    if (clean.length < 3 || seen.has(key) || GENERIC_CHEMICAL.has(key) || VAGUE.has(key)) return;
+    if (clean.length < 3 || seen.has(key) || GENERIC_CHEMICAL.has(key) || VAGUE.has(key) || NOT_A_CHEMICAL.test(clean)) return;
     if (!plausibleChemicalName(clean) && !cas && !isChemicalFormula(formula || clean)) return;
     if (CHEMICAL_HEAD_STOP.has(key.split(/[\s-]/)[0] ?? "")) return;
     seen.add(key);
@@ -525,6 +527,21 @@ function scriptLanguage(sample: string): { code: string; label: string } | null 
 
 function latinHits(sample: string): { hint: LatinHint; hits: number }[] {
   return LATIN_HINTS.map((hint) => ({ hint, hits: countTerms(sample, hint.pattern) })).sort((a, b) => b.hits - a.hits);
+}
+
+export function notEnglish(sample: string): string {
+  const text = sample.slice(0, 8000);
+  const danish = text.match(/fremgangsma|if[øo]lge|patentkrav|sammens[æa]et|ben[æa]evnelse|opfinder|overs[æa]ettelse|kendetegnet|patenthaver/gi)?.length ?? 0;
+  if (danish >= 2) return "Danish";
+  const dutch = text.match(/\b(?:octrooi|aanvrager|uitvinder|werkwijze|gekenmerkt|octrooiaanvrage)\b/gi)?.length ?? 0;
+  if (dutch >= 2) return "Dutch";
+  const spoken = detectLanguage(text);
+  if (spoken.code === "en") return "";
+  const foreign = foreignLetters(text);
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  const foreignScript = foreign >= 20 && foreign > latin * 0.2;
+  if (foreignScript || spoken.code !== "en") return spoken.label;
+  return "";
 }
 
 export function detectLanguage(text: string): { code: string; label: string } {

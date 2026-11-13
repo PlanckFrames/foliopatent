@@ -16,8 +16,8 @@ import {
 } from "lucide-react";
 import { describeClasses, lookupPatent } from "@/lib/patent/server-fns";
 import { biblioFromPdf, cleanTitle, collectNumbers, collectParties, extractPdfText, findPublicationId, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
-import { detectLanguage, scanText } from "@/lib/patent/scan";
-import { displayClaimNumber, documentHref, filingPlace, foreignLetters, grokUrl, patentUrl, samePassage, wikiSearch } from "@/lib/patent/text";
+import { notEnglish, scanText } from "@/lib/patent/scan";
+import { displayClaimNumber, documentHref, filingPlace, grokUrl, patentUrl, samePassage, wikiSearch } from "@/lib/patent/text";
 import type { OfficialRecord, PatentNumber, Scan } from "@/lib/patent/types";
 
 const SAMPLES = [
@@ -58,7 +58,10 @@ const FEATURES = [
   "Related cases",
 ];
 
-const LATIN_OTHER = new Set(["da", "nl", "de", "fr", "es", "pt", "it", "sv", "no", "fi", "pl", "ro", "tr", "lt", "lv", "af", "id", "ms", "vi", "fil", "sw"]);
+function assertEnglish(sample: string) {
+  const label = notEnglish(sample);
+  if (label) throw new Error(`FolioPatent only reads English patents. This one is in ${label}.`);
+}
 
 type ShownClaim = { number: string; text: string; independent: boolean };
 
@@ -383,17 +386,6 @@ export function FolioApp() {
       </main>
     </div>
   );
-}
-
-function assertEnglish(sample: string) {
-  const spoken = detectLanguage(sample);
-  if (spoken.code === "en") return;
-  const foreign = foreignLetters(sample);
-  const latin = (sample.match(/[A-Za-z]/g) ?? []).length;
-  const foreignScript = foreign >= 20 && foreign > latin * 0.2;
-  if (foreignScript || LATIN_OTHER.has(spoken.code)) {
-    throw new Error(`FolioPatent only reads English patents. This one is in ${spoken.label}.`);
-  }
 }
 
 function ReportView({ report }: { report: Report }) {

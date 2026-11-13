@@ -130,6 +130,20 @@ async function epoToken(key: string, secret: string): Promise<string | null> {
   return body.access_token ?? null;
 }
 
+function epoFamilyIds(id: string): string[] {
+  const match = id.toUpperCase().replace(/[^A-Z0-9]/g, "").match(/^([A-Z]{2})(\d+)([A-Z]\d?)?$/);
+  if (!match) return [id];
+  const office = match[1] ?? "";
+  const number = match[2] ?? "";
+  const kinds = [match[3] ?? "", "B1", "A1", "A2", "B2", ""];
+  const ids: string[] = [];
+  for (const kind of kinds) {
+    const next = `${office}${number}${kind}`;
+    if (!ids.includes(next)) ids.push(next);
+  }
+  return ids;
+}
+
 async function enrichEpo(record: OfficialRecord, key: string, secret: string) {
   if (!key || !secret) return;
   const token = await epoToken(key, secret);
@@ -137,18 +151,20 @@ async function enrichEpo(record: OfficialRecord, key: string, secret: string) {
     record.sourceNotes.push("EPO credentials were rejected");
     return;
   }
-  const response = await fetch(
-    `https://ops.epo.org/3.2/rest-services/family/publication/epodoc/${encodeURIComponent(record.id)}`,
-    {
+  let xml = "";
+  for (const id of epoFamilyIds(record.id)) {
+    const response = await fetch(`https://ops.epo.org/3.2/rest-services/family/publication/epodoc/${encodeURIComponent(id)}`, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/xml" },
       signal: AbortSignal.timeout(12_000),
-    },
-  );
-  if (!response.ok) {
-    record.sourceNotes.push("EPO family lookup unavailable");
+    });
+    if (!response.ok) continue;
+    xml = await response.text();
+    break;
+  }
+  if (!xml) {
+    record.sourceNotes.push("EPO had no family for this publication number");
     return;
   }
-  const xml = await response.text();
   const numbers = [
     ...xml.matchAll(/<country>([A-Z]{2})<\/country>\s*<doc-number>(\d+)<\/doc-number>\s*<kind>([A-Z]\d?)<\/kind>/gi),
   ].map((match) => `${match[1]}${match[2]}${match[3]}`);

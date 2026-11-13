@@ -519,7 +519,10 @@ export function biblioFromPdf(text: string): PdfBiblio {
     const bracket = match[1];
     if (bracket && (bracket.length >= 4 || bracket.startsWith("0"))) continue;
     const body = (match[3] ?? "").replace(/\s+/g, " ").trim();
-    if (body.length < 30 || narrativeParagraph(body)) continue;
+    if (!looksLikeEnglishClaim(body)) continue;
+    const number = Number(match[1] || match[2] || 0);
+    const previousNumber = Number(claims[claims.length - 1]?.number ?? 0);
+    if (claims.length > 0 && number > 0 && number < previousNumber) break;
     const previous = claims[claims.length - 1];
     if (previous && /^(?:[a-z][).、]|[（(][a-z0-9][)）])/i.test(body)) {
       previous.text = `${previous.text} ${body}`.slice(0, 4000);
@@ -544,6 +547,13 @@ function normalizeLayout(text: string): string {
     .replace(/(\d{1,3})\s+\./g, "$1.")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function looksLikeEnglishClaim(body: string): boolean {
+  if (body.length < 40 || narrativeParagraph(body)) return false;
+  if ((body.match(/[®™]/g) ?? []).length >= 2) return false;
+  if (/\b(if[øo]lge|fremgangsma|sammens[æa]et|patentkrav|kendetegnet|omfattende|octrooi|werkwijze|gekenmerkt)\b/i.test(body)) return false;
+  return /\b(comprising|comprises|wherein|according to claim|characterized in that|consisting of|consists of)\b/i.test(body);
 }
 
 function claimZoneFrom(flat: string): string {
