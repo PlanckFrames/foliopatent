@@ -496,10 +496,18 @@ export type PdfBiblio = {
 
 export function titleFromPdf(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
+  const named = flat.match(/发明名称\s*[:：]?\s*(.{4,160}?)(?=\s*(?:摘要|发明人|申请人|专利权人|技术领域|背景技术|\(\s*\d{2}\s*\))|$)/);
   const marked = flat.match(
-    /\(\s*54\s*\)\s*(.{8,220}?)(?=\(\s*\d{2}\s*\)|\b(?:abstract|sammendrag|opfinder|inventor|applicant|ansøger|ansoeger)\b)/i,
+    /\(\s*54\s*\)\s*(.{4,220}?)(?=\(\s*\d{2}\s*\)|发明名称|摘要|\b(?:abstract|inventor|applicant)\b)/i,
   );
-  return marked?.[1]?.replace(/\s+/g, " ").trim() ?? "";
+  return cleanTitle(named?.[1] || marked?.[1] || "");
+}
+
+export function cleanTitle(value: string): string {
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/^(?:发明名称|发明的名称|title of the invention|title)\s*[:：]?\s*/i, "")
+    .trim();
 }
 
 export function biblioFromPdf(text: string): PdfBiblio {
@@ -508,8 +516,10 @@ export function biblioFromPdf(text: string): PdfBiblio {
   const claims: { number: string; text: string }[] = [];
   const claimRe = /(?:\[(\d{1,5})\]|(?:^|\s)(\d{1,4})\.)\s+(.*?)(?=(?:\s\[\d{1,5}\]|\s\d{1,4}\.)\s|$)/g;
   for (const match of claimZone.matchAll(claimRe)) {
+    const bracket = match[1];
+    if (bracket && (bracket.length >= 4 || bracket.startsWith("0"))) continue;
     const body = (match[3] ?? "").replace(/\s+/g, " ").trim();
-    if (body.length < 30) continue;
+    if (body.length < 30 || narrativeParagraph(body)) continue;
     const previous = claims[claims.length - 1];
     if (previous && /^(?:[a-z][).、]|[（(][a-z0-9][)）])/i.test(body)) {
       previous.text = `${previous.text} ${body}`.slice(0, 4000);
@@ -529,7 +539,10 @@ export function biblioFromPdf(text: string): PdfBiblio {
 }
 
 function claimZoneFrom(flat: string): string {
-  const original = [...flat.matchAll(/权利要求(?!\d)|特許請求の範囲|청구항/g)];
+  const book = [...flat.matchAll(/权\s*利\s*要\s*求\s*书/g)];
+  const heading = book[book.length - 1];
+  if (heading?.index != null) return flat.slice(heading.index + heading[0].length);
+  const original = [...flat.matchAll(/权\s*利\s*要\s*求(?!根据|\s*\d)/g)];
   const first = original[0];
   if (first?.index != null) return flat.slice(first.index + first[0].length);
   const english = [
@@ -540,6 +553,10 @@ function claimZoneFrom(flat: string): string {
   const last = english[english.length - 1];
   if (!last || last.index == null) return "";
   return flat.slice(last.index + last[0].length);
+}
+
+function narrativeParagraph(body: string): boolean {
+  return /^(?:本发明涉及|本发明提供|目前|此外|背景|技术|本领域)/.test(body) && !/其特征|根据权利要求/.test(body);
 }
 
 function pullAbstract(flat: string): string {
@@ -554,7 +571,7 @@ function pullAbstract(flat: string): string {
     const next = marks[index + 1]?.index ?? flat.length;
     const window = flat.slice(start, Math.min(next, start + 2200));
     const stop = window.search(
-      /权利要求|特許請求|청구항|技术领域|背景技术|\b(?:claims|background|field of the invention|technical field|description|patentkrav|revendications|patentanspr|reivindicaciones|what is claimed)\b/i,
+      /权\s*利\s*要\s*求|技\s*术\s*领\s*域|背\s*景\s*技\s*术|发\s*明\s*内\s*容|具体实施方式|特許請求|청구항|\b(?:claims|background|field of the invention|technical field|description|patentkrav|revendications|patentanspr|reivindicaciones|what is claimed)\b/i,
     );
     const body = (stop > 40 ? window.slice(0, stop) : window).replace(/^[:\s]+/, "").replace(/\s+/g, " ").trim();
     if (body.length >= 40) found.push(body.slice(0, 3500));

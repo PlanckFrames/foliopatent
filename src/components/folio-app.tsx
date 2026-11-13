@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { describeClasses, lookupPatent, readPatentPages, translateClaims, translateOverview } from "@/lib/patent/server-fns";
-import { biblioFromPdf, collectNumbers, collectParties, extractPdfText, findPublicationId, inventorColumns, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
+import { biblioFromPdf, cleanTitle, collectNumbers, collectParties, extractPdfText, findPublicationId, inventorColumns, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
 import { absorbFindings, detectLanguage, scanText, type PageFinding } from "@/lib/patent/scan";
 import { displayClaimNumber, documentHref, filingPlace, foreignLetters, grokUrl, patentUrl, readingChunksFromExcerpt, samePassage, selectReadingPages, wikiSearch, type ReadingPage } from "@/lib/patent/text";
 import type { Brief, OfficialRecord, PatentNumber, Scan } from "@/lib/patent/types";
@@ -26,6 +26,7 @@ const SAMPLES = [
 ];
 
 const SECTIONS = [
+  { id: "title", title: "Title" },
   { id: "numbers", title: "Patent numbers" },
   { id: "dates", title: "Dates" },
   { id: "applicant", title: "Applicant" },
@@ -61,6 +62,11 @@ const FEATURES = [
 ];
 
 const USELESS_SUMMARY = /^(states what this claim protects|covers a mixture or formulation|covers a way of doing something|covers a device|covers a use of the invention|adds a further requirement)/i;
+
+function englishOnly(text: string): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean && !stillForeign(clean) ? clean : "";
+}
 
 function stillForeign(text: string): boolean {
   return foreignLetters(text) >= 8;
@@ -208,7 +214,7 @@ export function FolioApp() {
       const abstract = preferOriginal(pdfBiblio.abstract, excerptBiblio.abstract, record?.abstract ?? "");
       const backgroundSource = preferOriginal(pdfBiblio.background, excerptBiblio.background, "");
       const background = samePassage(abstract, backgroundSource) ? "" : backgroundSource;
-      const sourceTitle = preferOriginal(titleFromPdf(pdfText), record?.title ?? "", fileLabel || "Uploaded patent");
+      const sourceTitle = cleanTitle(preferOriginal(titleFromPdf(pdfText), record?.title ?? "", fileLabel || "Uploaded patent"));
       const pdfClaimsForeign = pdfBiblio.claims.some((claim) => foreignLetters(claim.text) >= 12);
       const sourceClaims = pdfClaimsForeign
         ? pdfBiblio.claims.map((claim, index) => ({
@@ -245,9 +251,9 @@ export function FolioApp() {
       );
       const fromRecord = !options.file;
 
-      let displayTitle = sourceTitle;
-      let displayAbstract = abstract;
-      let displayBackground = background;
+      let displayTitle = englishOnly(sourceTitle);
+      let displayAbstract = englishOnly(abstract);
+      let displayBackground = englishOnly(background);
       let plainPoints: string[] = [];
       let writtenClaims: ShownClaim[] = sourceClaims.map((claim) => ({ ...claim, original: claim.text, text: "", notes: [] }));
       let frontTranslated = false;
@@ -255,7 +261,7 @@ export function FolioApp() {
         sourceClaims.map((claim) => claim.text).join("\n").slice(0, 2500) || [sourceTitle, abstract, background].join("\n"),
       );
       if (sourceTitle || abstract || background) {
-        patchTab(tabId, { status: "Translating the abstract and background…" });
+        patchTab(tabId, { status: "Translating the title, abstract, and background…" });
         const overview = await translateOverview({
           data: { title: sourceTitle, abstract, background, languageLabel: frontLanguage.label },
         });
@@ -605,11 +611,8 @@ function ReportView({ report }: { report: Report }) {
 
       <div className="min-w-0">
       <h2 className="font-serif text-3xl leading-tight tracking-tight sm:text-4xl">
-        {report.displayTitle || record?.title || "Text from the uploaded PDF"}
+        {report.displayTitle || report.originalTitle || record?.title || "Text from the uploaded PDF"}
       </h2>
-      {report.frontTranslated && report.originalTitle && report.originalTitle !== report.displayTitle ? (
-        <p className="mt-2 text-sm leading-relaxed text-muted">Original title: {report.originalTitle}</p>
-      ) : null}
       <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-muted">
         {report.frontTranslated ? (
           <span className="rounded-full bg-wash px-3 py-1 font-semibold text-ink">Translated from {report.languageLabel}</span>
@@ -624,6 +627,9 @@ function ReportView({ report }: { report: Report }) {
       {report.note ? <p className="mt-3 text-sm text-muted">{report.note}</p> : null}
 
       <div className="mt-6 grid gap-4">
+        <Section n={sectionNumber("title")} id="title" title="Title" icon={<ScrollText className="size-4" />}>
+          <FacingText label="" original={report.originalTitle} english={report.displayTitle} />
+        </Section>
         <Section n={sectionNumber("numbers")} id="numbers" title="Patent numbers" icon={<Hash className="size-4" />}>
           {report.numbers.length > 0 ? (
             <dl className="grid gap-2">
@@ -878,17 +884,18 @@ function ReportView({ report }: { report: Report }) {
 
 function FacingText({ label, original, english }: { label: string; original: string; english: string }) {
   if (!original.trim() && !english.trim()) return null;
+  const translated = englishOnly(english);
   return (
     <div>
-      <p className="text-sm font-semibold text-copper">{label}</p>
-      <div className="mt-2 grid gap-4 lg:grid-cols-2">
+      {label ? <p className="text-sm font-semibold text-copper">{label}</p> : null}
+      <div className={`grid gap-4 lg:grid-cols-2 ${label ? "mt-2" : ""}`}>
         <div>
           <p className="text-sm font-semibold text-muted">Original</p>
           <p className="mt-1 leading-relaxed">{original}</p>
         </div>
         <div>
           <p className="text-sm font-semibold text-muted">English</p>
-          <p className="mt-1 leading-relaxed">{english}</p>
+          <p className="mt-1 leading-relaxed">{translated}</p>
         </div>
       </div>
     </div>
