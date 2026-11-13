@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { describeClasses, lookupPatent } from "@/lib/patent/server-fns";
-import { biblioFromPdf, cleanTitle, collectNumbers, collectParties, extractPdfText, findPublicationId, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
+import { biblioFromPdf, cleanTitle, clipTitle, collectNumbers, collectParties, extractPdfText, findPublicationId, titleFromPdf, type FaceParty } from "@/lib/patent/pdf";
 import { notEnglish, scanText } from "@/lib/patent/scan";
 import { displayClaimNumber, documentHref, filingPlace, grokUrl, patentUrl, samePassage, wikiSearch } from "@/lib/patent/text";
 import type { OfficialRecord, PatentNumber, Scan } from "@/lib/patent/types";
@@ -57,6 +57,17 @@ const FEATURES = [
   "Where it was filed",
   "Related cases",
 ];
+
+function chooseTitle(pdfTitle: string, recordTitle: string, fallback: string): string {
+  const fromPdf = clipTitle(pdfTitle);
+  const fromRecord = cleanTitle(recordTitle);
+  if (fromPdf && !titleLooksMixed(fromPdf)) return fromPdf;
+  return fromRecord || fromPdf || fallback;
+}
+
+function titleLooksMixed(title: string): boolean {
+  return /\d{1,3}[,.]\d{3}[,.]\d{3}|\.{4,}|\b(?:19|20)\d{2}\b/.test(title);
+}
 
 function assertEnglish(sample: string) {
   const label = notEnglish(sample);
@@ -182,7 +193,7 @@ export function FolioApp() {
       const abstract = pdfBiblio.abstract || record?.abstract || excerptBiblio.abstract;
       const backgroundSource = pdfBiblio.background || excerptBiblio.background;
       const background = samePassage(abstract, backgroundSource) ? "" : backgroundSource;
-      const title = cleanTitle(titleFromPdf(pdfText) || record?.title || fileLabel || "Uploaded patent");
+      const title = chooseTitle(titleFromPdf(pdfText), record?.title ?? "", fileLabel || "Uploaded patent");
       const claims: ShownClaim[] =
         pdfBiblio.claims.length > 0
           ? pdfBiblio.claims.map((claim, index) => ({

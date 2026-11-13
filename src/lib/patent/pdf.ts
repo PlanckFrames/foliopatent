@@ -6,7 +6,9 @@ const TEXT_PAGE_LIMIT = 50;
 const SCAN_PAGE_LIMIT = 40;
 const SPARSE_CHARS = 40;
 
-type TextItem = { str?: string };
+type TextItem = { str?: string; transform?: number[]; width?: number; height?: number };
+
+type PlacedWord = { text: string; x: number; y: number; x1: number; y1: number };
 
 type PdfViewport = { width: number; height: number };
 
@@ -73,11 +75,25 @@ export async function extractPdfText(file: File, onProgress?: (message: string) 
 }
 
 function itemsToLine(items: TextItem[]): string {
-  return items
-    .map((item) => item.str ?? "")
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
+  const words: PlacedWord[] = [];
+  for (const item of items) {
+    const text = item.str ?? "";
+    if (!text.trim() || !item.transform) continue;
+    const x = item.transform[4] ?? 0;
+    const y = -(item.transform[5] ?? 0);
+    const width = item.width ?? 0;
+    const height = item.height ?? 0;
+    words.push({ text, x, y, x1: x + width, y1: y + height });
+  }
+  if (words.length < 12) {
+    return items
+      .map((item) => item.str ?? "")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  const pageWidth = Math.max(...words.map((word) => word.x1));
+  return textInColumns(words, pageWidth);
 }
 
 function keepPages(pages: string[]): string[] {
@@ -125,13 +141,13 @@ async function readScan(doc: PdfDoc, pageCount: number, onProgress?: (message: s
   const lines: string[] = [];
   try {
     if (pack === "eng") {
-      const firstText = cleanOcr((await worker.recognize(first)).data.text ?? "");
+      const firstText = await readCanvas(worker, first);
       const latin = detectScanLanguage(firstText);
       if (latin) {
         onProgress?.(`Switching the reader to ${latin.label}…`);
         try {
           await worker.reinitialize(`eng+${latin.tess}`);
-          lines.push(cleanOcr((await worker.recognize(first)).data.text ?? ""));
+          lines.push(await readCanvas(worker, first));
         } catch {
           lines.push(firstText);
         }
@@ -144,8 +160,7 @@ async function readScan(doc: PdfDoc, pageCount: number, onProgress?: (message: s
       onProgress?.(`Reading the scan, page ${index} of ${pageCount}…`);
       const canvas = index === 1 ? first : await renderPage(doc, index);
       try {
-        const result = await worker.recognize(canvas);
-        lines.push(cleanOcr(result.data.text ?? ""));
+        lines.push(await readCanvas(worker, canvas));
       } catch {
         lines.push("");
       }
@@ -162,8 +177,11 @@ async function readScan(doc: PdfDoc, pageCount: number, onProgress?: (message: s
   return lines;
 }
 
+type OcrBlock = { paragraphs?: { lines?: { words?: { text?: string; bbox?: { x0: number; y0: number; x1: number; y1: number } }[] }[] }[] };
+type OcrPage = { text?: string; blocks?: OcrBlock[] | null };
+
 type OcrWorker = {
-  recognize: (image: HTMLCanvasElement) => Promise<{ data: { text?: string } }>;
+  recognize: (image: HTMLCanvasElement, options: Record<string, never>, output: { text: boolean; blocks: boolean }) => Promise<{ data: OcrPage }>;
   reinitialize: (langs: string) => Promise<unknown>;
   terminate: () => Promise<unknown>;
 };
@@ -179,6 +197,89 @@ async function openReader(langs: string, onProgress?: (message: string) => void)
   });
 }
 
+async function readCanvas(worker: OcrWorker, canvas: HTMLCanvasElement): Promise<string> {
+  const result = await worker.recognize(canvas, {}, { text: true, blocks: true });
+  const words = wordsFromBlocks(result.data.blocks);
+  const ordered = words.length > 0 ? textInColumns(words, canvas.width) : (result.data.text ?? "");
+  return cleanOcr(ordered);
+}
+
+function wordsFromBlocks(blocks: OcrBlock[] | null | undefined): PlacedWord[] {
+  const words: PlacedWord[] = [];
+  for (const block of blocks ?? []) {
+    for (const paragraph of block.paragraphs ?? []) {
+      for (const line of paragraph.lines ?? []) {
+        for (const word of line.words ?? []) {
+          const text = word.text?.trim() ?? "";
+          const box = word.bbox;
+          if (!text || !box) continue;
+          words.push({ text, x: box.x0, y: box.y0, x1: box.x1, y1: box.y1 });
+        }
+      }
+    }
+  }
+  return words;
+}
+
+export function textInColumns(words: PlacedWord[], pageWidth: number): string {
+  const live = words.filter((word) => word.text.trim());
+  if (live.length < 20 || pageWidth <= 0) return linesOf(live);
+  const gutter = findGutter(live, pageWidth);
+  if (gutter == null) return linesOf(live);
+  const spans = (word: PlacedWord) => word.x < gutter - 8 && word.x1 > gutter + 8;
+  const header = live.filter(spans);
+  const left = live.filter((word) => !spans(word) && word.x1 <= gutter + 6);
+  const right = live.filter((word) => !spans(word) && word.x >= gutter - 6);
+  if (left.length < 12 || right.length < 12) return linesOf(live);
+  return [linesOf(header), linesOf(left), linesOf(right)].filter(Boolean).join("\n\n");
+}
+
+function findGutter(words: PlacedWord[], pageWidth: number): number | null {
+  const buckets = 40;
+  const counts = new Array<number>(buckets).fill(0);
+  for (const word of words) {
+    const center = (word.x + word.x1) / 2;
+    const index = Math.min(buckets - 1, Math.max(0, Math.floor((center / pageWidth) * buckets)));
+    counts[index] += 1;
+  }
+  let best = -1;
+  let bestCount = Infinity;
+  for (let index = 14; index <= 26; index += 1) {
+    const window = (counts[index - 1] ?? 0) + (counts[index] ?? 0) + (counts[index + 1] ?? 0);
+    if (window < bestCount) {
+      bestCount = window;
+      best = index;
+    }
+  }
+  const left = counts.slice(0, 14).reduce((sum, count) => sum + count, 0);
+  const right = counts.slice(27).reduce((sum, count) => sum + count, 0);
+  if (best < 0 || left < 12 || right < 12 || bestCount > (left + right) * 0.08) return null;
+  return ((best + 0.5) / buckets) * pageWidth;
+}
+
+function linesOf(words: PlacedWord[]): string {
+  const heights = words.map((word) => Math.max(1, word.y1 - word.y)).sort((a, b) => a - b);
+  const tolerance = Math.max(3, (heights[Math.floor(heights.length / 2)] ?? 10) * 0.65);
+  const sorted = [...words].sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines: PlacedWord[][] = [];
+  for (const word of sorted) {
+    const line = lines[lines.length - 1];
+    const anchor = line?.[0]?.y ?? Number.NaN;
+    if (!line || Math.abs(word.y - anchor) > tolerance) lines.push([word]);
+    else line.push(word);
+  }
+  return lines
+    .map((line) =>
+      line
+        .sort((a, b) => a.x - b.x)
+        .map((word) => word.text)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+    .filter(Boolean)
+    .join("\n");
+}
 function packLabel(pack: string): string {
   const labels: Record<string, string> = {
     "rus+bul+eng": "Cyrillic",
@@ -500,7 +601,12 @@ export function titleFromPdf(text: string): string {
   const marked = flat.match(
     /\(\s*54\s*\)\s*(.{4,220}?)(?=\(\s*\d{2}\s*\)|发明名称|摘要|\b(?:abstract|inventor|applicant)\b)/i,
   );
-  return cleanTitle(named?.[1] || marked?.[1] || "");
+  return clipTitle(named?.[1] || marked?.[1] || "");
+}
+
+export function clipTitle(value: string): string {
+  const cut = value.split(/\d{1,3}[,.]\d{3}[,.]\d{3}|\.{4,}/)[0] ?? value;
+  return cleanTitle(cut);
 }
 
 export function cleanTitle(value: string): string {
@@ -519,10 +625,10 @@ export function biblioFromPdf(text: string): PdfBiblio {
     const bracket = match[1];
     if (bracket && (bracket.length >= 4 || bracket.startsWith("0"))) continue;
     const body = (match[3] ?? "").replace(/\s+/g, " ").trim();
-    if (!looksLikeEnglishClaim(body)) continue;
     const number = Number(match[1] || match[2] || 0);
+    if (!looksLikeEnglishClaim(body, number)) continue;
     const previousNumber = Number(claims[claims.length - 1]?.number ?? 0);
-    if (claims.length > 0 && number > 0 && number < previousNumber) break;
+    if (claims.length > 0 && (number <= previousNumber || number > previousNumber + 3)) continue;
     const previous = claims[claims.length - 1];
     if (previous && /^(?:[a-z][).、]|[（(][a-z0-9][)）])/i.test(body)) {
       previous.text = `${previous.text} ${body}`.slice(0, 4000);
@@ -549,9 +655,10 @@ function normalizeLayout(text: string): string {
     .trim();
 }
 
-function looksLikeEnglishClaim(body: string): boolean {
-  if (body.length < 40 || narrativeParagraph(body)) return false;
+function looksLikeEnglishClaim(body: string, number: number): boolean {
+  if (number < 1 || number > 80 || body.length < 40 || narrativeParagraph(body)) return false;
   if ((body.match(/[®™]/g) ?? []).length >= 2) return false;
+  if (!/^(?:a|an|the)\b/i.test(body)) return false;
   if (/\b(if[øo]lge|fremgangsma|sammens[æa]et|patentkrav|kendetegnet|omfattende|octrooi|werkwijze|gekenmerkt)\b/i.test(body)) return false;
   return /\b(comprising|comprises|wherein|according to claim|characterized in that|consisting of|consists of)\b/i.test(body);
 }
