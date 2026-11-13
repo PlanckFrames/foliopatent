@@ -690,7 +690,7 @@ function loosePoints(value: unknown): string[] {
 }
 
 type OverviewInput = { title: string; abstract: string; background: string; languageLabel: string };
-type OverviewResult = { title: string; abstract: string; background: string; bullets: string[] };
+type OverviewResult = { title: string; abstract: string; background: string; bullets: string[]; error: string };
 
 async function translatePiece(apiKey: string, text: string): Promise<string> {
   const source = text.replace(/\s+/g, " ").trim();
@@ -750,19 +750,27 @@ export const translateOverview = createServerFn({ method: "POST" })
     languageLabel: (input.languageLabel ?? "the source language").slice(0, 40),
   }))
   .handler(async ({ data }): Promise<OverviewResult> => {
-    const untouched: OverviewResult = {
+    const untouched = (error: string): OverviewResult => ({
       title: mostlyForeign(data.title) ? "" : data.title,
       abstract: mostlyForeign(data.abstract) ? "" : data.abstract,
       background: mostlyForeign(data.background) ? "" : data.background,
       bullets: [],
-    };
+      error,
+    });
     const apiKey = readKey("XAI_API_KEY");
-    if (!apiKey || (!data.title && !data.abstract && !data.background)) return untouched;
+    if (!data.title && !data.abstract && !data.background) return untouched("");
+    if (!apiKey) return untouched("The server has no xAI key, so nothing was translated.");
     const title = await translatePiece(apiKey, data.title);
     const abstract = await translatePiece(apiKey, data.abstract);
     const background = await translatePiece(apiKey, data.background);
     const bullets = await explainInBullets(apiKey, [abstract, background].filter(Boolean).join("\n\n"), "4 to 6");
-    return { title, abstract, background, bullets };
+    const error =
+      mostlyForeign(data.title) && !title
+        ? "The title was not translated. The translation service returned nothing usable."
+        : mostlyForeign(data.abstract) && !abstract
+          ? "The abstract was not translated. The translation service returned nothing usable."
+          : "";
+    return { title, abstract, background, bullets, error };
   });
 
 type ClaimBatch = { number: string; text: string };

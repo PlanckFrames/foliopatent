@@ -511,10 +511,10 @@ export function cleanTitle(value: string): string {
 }
 
 export function biblioFromPdf(text: string): PdfBiblio {
-  const flat = text.replace(/\s+/g, " ");
+  const flat = normalizeLayout(text);
   const claimZone = claimZoneFrom(flat).slice(0, 80_000);
   const claims: { number: string; text: string }[] = [];
-  const claimRe = /(?:\[(\d{1,5})\]|(?:^|\s)(\d{1,4})\.)\s+(.*?)(?=(?:\s\[\d{1,5}\]|\s\d{1,4}\.)\s|$)/g;
+  const claimRe = /(?:\[(\d{1,5})\]|(?:^|\s)(\d{1,4})\.(?!\d))\s*(.*?)(?=(?:\s\[\d{1,5}\]|\s\d{1,4}\.(?!\d))|$)/g;
   for (const match of claimZone.matchAll(claimRe)) {
     const bracket = match[1];
     if (bracket && (bracket.length >= 4 || bracket.startsWith("0"))) continue;
@@ -529,7 +529,7 @@ export function biblioFromPdf(text: string): PdfBiblio {
       number: displayClaimNumber(match[1] || match[2] || String(claims.length + 1)),
       text: body.slice(0, 4000),
     });
-    if (claims.length >= 40) break;
+    if (claims.length >= 60) break;
   }
   return {
     abstract: pullAbstract(flat),
@@ -538,13 +538,20 @@ export function biblioFromPdf(text: string): PdfBiblio {
   };
 }
 
+function normalizeLayout(text: string): string {
+  return text
+    .replace(/([\u3400-\u9fff])\s+(?=[\u3400-\u9fff])/g, "$1")
+    .replace(/(\d{1,3})\s+\./g, "$1.")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function claimZoneFrom(flat: string): string {
-  const book = [...flat.matchAll(/权\s*利\s*要\s*求\s*书/g)];
-  const heading = book[book.length - 1];
+  const numbered = flat.search(/(?:^|\s)1\.\s*(?:一种|根据|按照|如权利要求)/);
+  if (numbered >= 0) return flat.slice(numbered);
+  const book = [...flat.matchAll(/权利要求书/g)];
+  const heading = book[0];
   if (heading?.index != null) return flat.slice(heading.index + heading[0].length);
-  const original = [...flat.matchAll(/权\s*利\s*要\s*求(?!根据|\s*\d)/g)];
-  const first = original[0];
-  if (first?.index != null) return flat.slice(first.index + first[0].length);
   const english = [
     ...flat.matchAll(
       /\b(?:what is claimed is|claims|patentkrav|revendications|patentanspr[uü]che|reivindicaciones|rivendicazioni)\b/gi,

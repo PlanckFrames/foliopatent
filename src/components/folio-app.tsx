@@ -255,6 +255,7 @@ export function FolioApp() {
       let displayAbstract = englishOnly(abstract);
       let displayBackground = englishOnly(background);
       let plainPoints: string[] = [];
+      let translationNote = "";
       let writtenClaims: ShownClaim[] = sourceClaims.map((claim) => ({ ...claim, original: claim.text, text: "", notes: [] }));
       let frontTranslated = false;
       const frontLanguage = detectLanguage(
@@ -270,21 +271,30 @@ export function FolioApp() {
         if (overview.abstract && !stillForeign(overview.abstract)) displayAbstract = overview.abstract;
         if (overview.background && !stillForeign(overview.background)) displayBackground = overview.background;
         plainPoints = overview.bullets;
-        frontTranslated = displayTitle !== sourceTitle || displayAbstract !== abstract || displayBackground !== background || plainPoints.length > 0;
+        translationNote = overview.error;
+        frontTranslated = Boolean(displayTitle && displayTitle !== sourceTitle) || Boolean(displayAbstract && displayAbstract !== abstract) || plainPoints.length > 0;
       }
-      for (const claim of sourceClaims) {
+      for (let index = 0; index < sourceClaims.length; index += 4) {
         if (!liveTabs.current.has(tabId)) return;
-        patchTab(tabId, { status: `Translating claim ${claim.number}…` });
-        const part = await translateClaims({
-          data: { languageLabel: frontLanguage.label, claims: [{ number: claim.number, text: claim.text }] },
-        });
-        if (!liveTabs.current.has(tabId)) return;
-        const next = part.claims.find((item) => displayClaimNumber(item.number) === claim.number) ?? part.claims[0];
-        if (!next?.english || stillForeign(next.english)) continue;
-        frontTranslated = true;
-        writtenClaims = writtenClaims.map((item) =>
-          item.number === claim.number && item.original === claim.text ? { ...item, text: next.english, notes: next.bullets } : item,
+        const group = sourceClaims.slice(index, index + 4);
+        const last = group[group.length - 1]?.number ?? "";
+        patchTab(tabId, { status: group.length === 1 ? `Translating claim ${group[0]?.number}…` : `Translating claims ${group[0]?.number}–${last}…` });
+        const parts = await Promise.all(
+          group.map((claim) =>
+            translateClaims({
+              data: { languageLabel: frontLanguage.label, claims: [{ number: claim.number, text: claim.text }] },
+            }),
+          ),
         );
+        if (!liveTabs.current.has(tabId)) return;
+        for (const part of parts) {
+          const next = part.claims[0];
+          if (!next?.english || stillForeign(next.english)) continue;
+          frontTranslated = true;
+          writtenClaims = writtenClaims.map((item) =>
+            item.number === next.number && !item.text ? { ...item, text: next.english, notes: next.bullets } : item,
+          );
+        }
       }
       const missing = writtenClaims.filter((claim) => claim.original && !claim.text && fieldNeedsTranslation(claim.original));
       for (const claim of missing) {
@@ -382,7 +392,7 @@ export function FolioApp() {
           record,
           scan,
           brief,
-          note: [pdfNote, pageNote, ...(record?.sourceNotes ?? [])].filter(Boolean).join(" · "),
+          note: [pdfNote, translationNote, pageNote, ...(record?.sourceNotes ?? [])].filter(Boolean).join(" · "),
           numbers: collectNumbers(record, pdfText),
           writtenClaims,
           parties: collectParties(record, pdfText),
