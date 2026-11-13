@@ -12,6 +12,7 @@ import {
   ScrollText,
   Search,
   Users,
+  X,
 } from "lucide-react";
 import { explainPatent, lookupPatent } from "@/lib/patent/server-fns";
 import { biblioFromPdf, collectParties, extractPdfText, findPublicationId, type FaceParty } from "@/lib/patent/pdf";
@@ -71,34 +72,89 @@ type Report = {
   parties: Record<FaceParty["role"], FaceParty[]>;
 };
 
+type Tab = {
+  id: string;
+  label: string;
+  report: Report | null;
+  phase: "working" | "ready" | "error";
+  status: string;
+  error: string;
+  translateTo: string;
+  translating: boolean;
+};
+
+const TAB_LIMIT = 10;
+
 export function FolioApp() {
   const [publicationId, setPublicationId] = useState("");
-  const [phase, setPhase] = useState<"idle" | "working" | "ready" | "error">("idle");
-  const [status, setStatus] = useState("");
-  const [error, setError] = useState("");
-  const [report, setReport] = useState<Report | null>(null);
-  const [translateTo, setTranslateTo] = useState("Spanish");
-  const [translating, setTranslating] = useState(false);
-  const runId = useRef(0);
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [banner, setBanner] = useState("");
+  const tabSeq = useRef(0);
+  const liveTabs = useRef(new Set<string>());
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
   const fileRef = useRef<HTMLInputElement>(null);
+  const active = tabs.find((tab) => tab.id === activeId) ?? null;
+
+  function patchTab(id: string, patch: Partial<Tab>) {
+    if (!liveTabs.current.has(id)) return;
+    setTabs((current) => current.map((tab) => (tab.id === id ? { ...tab, ...patch } : tab)));
+  }
+
+  function closeTab(id: string) {
+    liveTabs.current.delete(id);
+    setTabs((current) => {
+      const index = current.findIndex((tab) => tab.id === id);
+      const next = current.filter((tab) => tab.id !== id);
+      setActiveId((open) => (open === id ? (next[Math.min(index, next.length - 1)]?.id ?? null) : open));
+      return next;
+    });
+    setBanner("");
+  }
 
   async function buildReport(options: { id?: string; file?: File }) {
-    const token = ++runId.current;
-    setPhase("working");
-    setError("");
-    setReport(null);
+    const typed = options.id?.trim() ?? "";
+    if (!options.file && !typed) {
+      setBanner("Enter a publication number or upload a patent PDF.");
+      return;
+    }
+    if (options.file && options.file.size > 30 * 1024 * 1024) {
+      setBanner("That PDF is over 30 MB. Try a smaller file.");
+      return;
+    }
+    if (liveTabs.current.size >= TAB_LIMIT) {
+      setBanner("Close a tab first. 10/10 are already open.");
+      return;
+    }
+    const tabId = `tab-${++tabSeq.current}`;
+    liveTabs.current.add(tabId);
+    const fileLabel = options.file?.name.replace(/\.pdf$/i, "") ?? "";
+    setBanner("");
+    setTabs((current) => [
+      ...current,
+      {
+        id: tabId,
+        label: fileLabel || typed || "Patent",
+        report: null,
+        phase: "working",
+        status: options.file ? "Reading the PDF in this browser…" : "Opening the public patent record…",
+        error: "",
+        translateTo: "Spanish",
+        translating: false,
+      },
+    ]);
+    setActiveId(tabId);
     try {
       let pdfText = "";
       let pdfNote = "";
-      let id = options.id?.trim() ?? "";
+      let id = options.file ? "" : typed;
       if (options.file) {
-        if (options.file.size > 30 * 1024 * 1024) throw new Error("That PDF is over 30 MB. Try a smaller file.");
-        setStatus("Reading the PDF in this browser…");
         const extracted = await extractPdfText(options.file, (message) => {
-          if (token !== runId.current) return;
-          setStatus(message);
+          if (!liveTabs.current.has(tabId)) return;
+          patchTab(tabId, { status: message });
         });
-        if (token !== runId.current) return;
+        if (!liveTabs.current.has(tabId)) return;
         pdfText = extracted.text;
         if (!pdfText.trim()) {
           throw new Error("This PDF could not be read. Type the publication number, or upload a clearer file.");
@@ -107,14 +163,14 @@ export function FolioApp() {
         pdfNote = extracted.truncated
           ? `Read the first ${extracted.scanned ? 24 : 50} pages of the ${where} in this browser. The file was not uploaded.`
           : `Read the uploaded ${where} in this browser. The file was not uploaded.`;
-        id = id || findPublicationId(pdfText);
+        id = findPublicationId(pdfText);
       }
 
       let record: OfficialRecord | null = null;
       if (id) {
-        setStatus("Opening the public patent record…");
+        patchTab(tabId, { status: "Opening the public patent record…", label: id });
         const looked = await lookupPatent({ data: { id } });
-        if (token !== runId.current) return;
+        if (!liveTabs.current.has(tabId)) return;
         if (looked.ok) record = looked.record;
         else if (!pdfText) throw new Error(looked.error);
         else pdfNote = `${pdfNote} The publication number in the file did not match a public record, so bibliographic fields come only from the PDF.`;
@@ -135,10 +191,10 @@ export function FolioApp() {
         keywords: record?.keywords,
       });
 
-      setStatus("Writing a plain-language brief…");
+      patchTab(tabId, { status: "Writing a plain-language brief…" });
       const brief = await explainPatent({
         data: {
-          title: record?.title || "Uploaded patent",
+          title: record?.title || fileLabel || "Uploaded patent",
           abstract,
           claims: writtenClaims.map((claim) => ({ number: claim.number, text: claim.text })),
           context: (record?.excerpt || pdfText).slice(0, 2500),
@@ -146,32 +202,41 @@ export function FolioApp() {
           targetLanguage: "",
         },
       });
-      if (token !== runId.current) return;
+      if (!liveTabs.current.has(tabId)) return;
 
-      setReport({
-        record,
-        scan,
-        brief,
-        languageLabel: language.label,
-        note: [pdfNote, ...(record?.sourceNotes ?? [])].filter(Boolean).join(" · "),
-        abstract,
-        writtenClaims,
-        parties: collectParties(record, pdfText),
+      patchTab(tabId, {
+        phase: "ready",
+        status: "",
+        label: record?.id || id || fileLabel || "Document",
+        report: {
+          record,
+          scan,
+          brief,
+          languageLabel: language.label,
+          note: [pdfNote, ...(record?.sourceNotes ?? [])].filter(Boolean).join(" · "),
+          abstract,
+          writtenClaims,
+          parties: collectParties(record, pdfText),
+        },
       });
-      setPhase("ready");
-      setStatus("");
-      if (record?.id) setPublicationId(record.id);
+      if (options.file) setPublicationId(record?.id || id || "");
+      else if (record?.id) setPublicationId(record.id);
     } catch (caught) {
-      if (token !== runId.current) return;
-      setPhase("error");
-      setStatus("");
-      setError(caught instanceof Error ? caught.message : "The patent could not be read.");
+      if (!liveTabs.current.has(tabId)) return;
+      patchTab(tabId, {
+        phase: "error",
+        status: "",
+        error: caught instanceof Error ? caught.message : "The patent could not be read.",
+      });
     }
   }
 
   async function translateAbstract() {
-    if (!report?.abstract) return;
-    setTranslating(true);
+    const tab = tabsRef.current.find((item) => item.id === activeId);
+    if (!tab?.report?.abstract || !liveTabs.current.has(tab.id)) return;
+    const tabId = tab.id;
+    const report = tab.report;
+    patchTab(tabId, { translating: true });
     try {
       const brief = await explainPatent({
         data: {
@@ -180,12 +245,23 @@ export function FolioApp() {
           claims: [],
           context: "",
           language: "en",
-          targetLanguage: translateTo,
+          targetLanguage: tab.translateTo,
         },
       });
-      setReport({ ...report, brief: { ...report.brief, translation: brief.translation || brief.abstractSummary } });
-    } finally {
-      setTranslating(false);
+      if (!liveTabs.current.has(tabId)) return;
+      setTabs((current) =>
+        current.map((item) =>
+          item.id === tabId && item.report
+            ? {
+                ...item,
+                translating: false,
+                report: { ...item.report, brief: { ...item.report.brief, translation: brief.translation || brief.abstractSummary } },
+              }
+            : item,
+        ),
+      );
+    } catch {
+      patchTab(tabId, { translating: false });
     }
   }
 
@@ -194,7 +270,7 @@ export function FolioApp() {
       <header className="sticky top-0 z-10 border-b border-line bg-paper">
         <div className="mx-auto flex max-w-6xl items-baseline justify-between gap-4 px-4 py-3">
           <p className="font-serif text-2xl leading-none tracking-tight">FolioPatent</p>
-          <p className="text-sm text-muted">One patent at a time</p>
+          <p className="text-sm text-muted">Up to ten open</p>
         </div>
       </header>
 
@@ -229,10 +305,10 @@ export function FolioApp() {
               />
               <button
                 type="submit"
-                disabled={phase === "working"}
+                disabled={tabs.length >= TAB_LIMIT}
                 className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-copper px-5 font-semibold text-copper-ink disabled:opacity-60"
               >
-                {phase === "working" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
+                <Search className="size-4" />
                 Analyze patent
               </button>
             </div>
@@ -275,23 +351,68 @@ export function FolioApp() {
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 event.target.value = "";
-                if (file) void buildReport({ id: publicationId, file });
+                if (file) void buildReport({ file });
               }}
             />
           </div>
         </form>
 
-        {phase === "working" ? (
+        <div className="mt-6 flex items-end gap-3">
+          <div className="flex min-w-0 flex-1 items-end gap-1 overflow-x-auto" role="tablist" aria-label="Open patents">
+            {tabs.map((tab) => {
+              const selected = tab.id === activeId;
+              return (
+                <div
+                  key={tab.id}
+                  className={`flex min-w-32 max-w-56 shrink-0 items-center rounded-t-xl border border-b-0 ${selected ? "border-line bg-card" : "border-transparent bg-wash"}`}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    onClick={() => setActiveId(tab.id)}
+                    className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left text-sm font-semibold"
+                  >
+                    {tab.phase === "working" ? <Loader2 className="size-3.5 shrink-0 animate-spin" /> : null}
+                    <span className="truncate">{tab.label}</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Close ${tab.label}`}
+                    onClick={() => closeTab(tab.id)}
+                    className="mr-1 grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-paper hover:text-ink"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <p className="mb-2 shrink-0 font-mono text-sm text-muted" aria-live="polite">
+            {tabs.length}/{TAB_LIMIT}
+          </p>
+        </div>
+
+        {banner ? <p className="mt-4 rounded-xl border border-line bg-wash px-4 py-3 text-sm leading-relaxed">{banner}</p> : null}
+
+        {active?.phase === "working" ? (
           <p className="mt-6 flex items-center gap-2 text-sm font-semibold">
             <Loader2 className="size-4 animate-spin" />
-            {status}
+            {active.status}
           </p>
         ) : null}
-        {error ? (
-          <p className="mt-6 rounded-xl border border-line bg-wash px-4 py-3 text-sm leading-relaxed">{error}</p>
+        {active?.phase === "error" ? (
+          <p className="mt-6 rounded-xl border border-line bg-wash px-4 py-3 text-sm leading-relaxed">{active.error}</p>
         ) : null}
-
-        {report ? <ReportView report={report} translateTo={translateTo} translating={translating} onLanguage={setTranslateTo} onTranslate={() => void translateAbstract()} /> : null}
+        {active?.report ? (
+          <ReportView
+            report={active.report}
+            translateTo={active.translateTo}
+            translating={active.translating}
+            onLanguage={(value) => patchTab(active.id, { translateTo: value })}
+            onTranslate={() => void translateAbstract()}
+          />
+        ) : null}
 
         <footer className="mt-16 border-t border-line pt-6 text-sm leading-relaxed text-muted">
           PDFs and scans stay on this device. Lookup uses the configured patent services, then the public patent page. The
